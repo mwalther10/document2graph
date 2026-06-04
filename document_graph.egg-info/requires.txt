@@ -1,0 +1,12 @@
+docling
+docling-parse
+numpy
+matplotlib
+regex
+networkx
+coloredlogs
+transformers
+
+[dev]
+pytest
+httpx

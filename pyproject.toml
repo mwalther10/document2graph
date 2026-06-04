@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "document-graph"
+version = "0.1.0"
+description = "Extract hierarchical document graphs and baseline chunks from PDF"
+readme = "README.md"
+license = {text = "GPL-3.0"}
+authors = [{name = "Marina Walther", email = "marina.walther@gmail.com"}]
+requires-python = ">=3.11"
+dependencies = [
+    "docling",
+    "docling-parse",
+    "numpy",
+    "matplotlib",
+    "regex",
+    "networkx",
+    "coloredlogs",
+    "transformers",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["document_graph*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "slow: tests that download models or do heavy processing (skip with -m 'not slow')",
+]

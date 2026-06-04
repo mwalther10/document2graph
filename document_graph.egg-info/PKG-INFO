@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: document-graph
+Version: 0.1.0
+Summary: Extract hierarchical document graphs and baseline chunks from PDF
+Requires-Python: >=3.11
+Requires-Dist: docling
+Requires-Dist: docling-parse
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+Requires-Dist: regex
+Requires-Dist: networkx
+Requires-Dist: coloredlogs
+Requires-Dist: transformers
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: httpx; extra == "dev"
