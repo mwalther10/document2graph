@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "document2graph"
-version = "0.1.0"
+version = "0.1.1"
 description = "Extract hierarchical document graphs and baseline chunks from PDF"
 readme = "README.md"
 license = {text = "MIT"}
