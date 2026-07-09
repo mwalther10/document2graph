@@ -1,4 +1,4 @@
-# Document Graph Extractor
+# Document to Graph Extractor
 
 Extract hierarchical document graphs and baseline chunks from PDF files. The package parses PDFs using [Docling](https://github.com/DS4SD/docling) and produces two complementary representations:
 
