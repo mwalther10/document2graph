@@ -26,7 +26,9 @@ document2graph/models/__init__.py
 document2graph/utils/__init__.py
 document2graph/utils/base_extractor.py
 document2graph/utils/doc_to_tree_lib.py
+document2graph/utils/edge_weight_lib.py
 document2graph/utils/hybrid_chunker_extractor.py
 document2graph/utils/log.py
 tests/test_document2graph_extractor.py
+tests/test_edge_weight_lib.py
 tests/test_snippet_graph.py

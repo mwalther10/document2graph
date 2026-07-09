@@ -12,3 +12,6 @@ transformers
 [dev]
 pytest
 httpx
+
+[embeddings]
+sentence-transformers
