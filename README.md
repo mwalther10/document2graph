@@ -92,6 +92,38 @@ config = ExtractorConfig(
 )
 ```
 
+#### Relevancy weights
+
+Optionally, a content-based relevancy weight can be combined with the structural weight
+of each edge. Relevancy weights are computed from the parent and child snippet texts and
+normalized to [0, 1]: 0 means parent and child are highly similar (the parent adds little
+new context for the child), 1 means the parent is very relevant to consider when looking
+at the child.
+
+Three metrics are available:
+
+- `bm25` — lexical relevancy: Okapi BM25, clipped at zero and normalized by the maximum
+  BM25 score across the document tree. `bm25_scoring` controls the query/document
+  asymmetry: `child_query` (default, child text as query against the parent text),
+  `symmetric_mean`, or `symmetric_max` (mean/max of both directions)
+- `embedding` — semantic relevancy: cosine similarity of sentence embeddings from a
+  configurable model (requires the `embeddings` extra: `pip install document2graph[embeddings]`)
+- `blend` — linear blend `alpha * embedding + (1 - alpha) * bm25`
+
+```python
+from document2graph.models import EdgeWeightConfig, RelevancyWeightConfig
+
+edge_weights = EdgeWeightConfig(
+    relevancy=RelevancyWeightConfig(
+        enabled=True,
+        metric="blend",           # "bm25", "embedding", or "blend"
+        embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+        alpha=0.5,                # semantic share: 1.0 = fully semantic, 0.0 = fully lexical
+        combination="mean",       # combine with the structural weight: "mean" or "multiply"
+    ),
+)
+```
+
 #### Connectivity guarantee
 
 Each graph contains a synthetic root node (`#/document-root`, labelled with the document
@@ -193,7 +225,8 @@ chunks = extractor.extract_baseline_chunks(
 | `DocumentMetadata` | `version`, `authors`, `institutions`, `bibliography`, `correspondence` |
 | `MetadataExtractionConfig` | `title_page`, `version`, `authors`, `institutions`, `bibliography`, `correspondence` (each a `MetadataFieldConfig`) |
 | `MetadataFieldConfig` | `label` (search string), `pages` (inclusive 1-based page range, e.g. `(1, 3)`) |
-| `EdgeWeightConfig` | `section`, `text`, `list_item`, `media`, `unreferenced_media`, `root` (edge weights by category) |
+| `EdgeWeightConfig` | `section`, `text`, `list_item`, `media`, `unreferenced_media`, `root` (edge weights by category), `relevancy: RelevancyWeightConfig` |
+| `RelevancyWeightConfig` | `enabled`, `metric` (bm25/embedding/blend), `embedding_model`, `alpha`, `bm25_k1`, `bm25_b`, `bm25_scoring` (child_query/symmetric_mean/symmetric_max), `combination` (mean/multiply) |
 
 ## Running tests
 

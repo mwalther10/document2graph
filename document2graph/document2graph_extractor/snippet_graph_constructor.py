@@ -16,6 +16,7 @@ import uuid
 from typing import TypeVar
 
 from ..utils.doc_to_tree_lib import get_heights, get_height_hist, get_text_body_height, compute_snippet_level
+from ..utils.edge_weight_lib import apply_relevancy_weights
 
 T = TypeVar('T', bound=ImageSnippetNode)
 
@@ -376,11 +377,25 @@ class SnippetGraphConstructor():
             extra_edges.append((ROOT_NODE_ID, top.snippet_id, self.edge_weights.root))
         return extra_edges
 
+    def node_texts(self, nodes: list[SnippetNode]) -> dict[str, str]:
+        """Text content per node id, used for content-based relevancy weights."""
+        texts = {ROOT_NODE_ID: self._document_metadata.title or ""}
+        for node in nodes:
+            if isinstance(node, TableSnippetNode):
+                texts[node.snippet_id] = f"{node.caption_text}\n{node.markdown_serialization}".strip()
+            elif isinstance(node, ImageSnippetNode):
+                texts[node.snippet_id] = node.caption_text
+            else:
+                texts[node.snippet_id] = node.text
+        return texts
+
     def get_graph(self, save_to="") -> tuple[list[TextSnippetNode], list[ImageSnippetNode], list[TableSnippetNode], list[WeightedEdge]]:
         text_nodes, image_nodes, table_nodes = self.construct_snippet_nodes()
         all_nodes: list[SnippetNode] = text_nodes + image_nodes + table_nodes
         edges = self.construct_snippet_edges(all_nodes)
         edges += self.connect_components(all_nodes, edges)
+        if self.edge_weights.relevancy.enabled:
+            edges = apply_relevancy_weights(edges, self.node_texts(all_nodes), self.edge_weights.relevancy)
         if save_to != "":
             self.write_nx_graph(save_to, text_nodes, image_nodes, table_nodes, edges)
         return text_nodes, image_nodes, table_nodes, edges
