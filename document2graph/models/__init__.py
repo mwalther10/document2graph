@@ -1,5 +1,5 @@
 from .Chunk import Chunk
-from .EdgeWeightConfig import EdgeWeightConfig
+from .EdgeWeightConfig import EdgeWeightConfig, RelevancyWeightConfig
 from .ExtractorConfig import ExtractorConfig
 from .Snippet import Snippet
 from .Document import Document
@@ -12,6 +12,7 @@ from .TextSnippet import TextSnippet
 __all__ = [
     "Chunk",
     "EdgeWeightConfig",
+    "RelevancyWeightConfig",
     "ExtractorConfig",
     "Snippet",
     "Document",

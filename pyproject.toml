@@ -40,6 +40,7 @@ Issues = "https://github.com/mwalther10/document2graph/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
+embeddings = ["sentence-transformers"]
 
 [tool.setuptools.packages.find]
 where = ["."]
