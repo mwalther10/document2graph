@@ -10,7 +10,7 @@ readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "Marina Walther", email = "marina.walther@gmail.com"}]
 requires-python = ">=3.11"
-keywords = ["pdf", "document-graph", "docling", "networkx", "chunking", "retrieval"]
+keywords = ["pdf", "document2graph", "docling", "networkx", "chunking", "retrieval"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -35,15 +35,15 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mwalther10/document-graph"
-Issues = "https://github.com/mwalther10/document-graph/issues"
+Homepage = "https://github.com/mwalther10/document2graph"
+Issues = "https://github.com/mwalther10/document2graph/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["document_graph*"]
+include = ["document2graph*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

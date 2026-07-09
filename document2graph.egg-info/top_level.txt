@@ -1,1 +1,1 @@
-document_graph
+document2graph

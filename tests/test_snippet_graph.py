@@ -3,11 +3,11 @@ import pytest
 from docling_core.types.doc.base import BoundingBox
 from docling_core.types.doc.document import RefItem
 
-from document_graph.document_graph_extractor.snippet_graph_constructor import (
+from document2graph.document2graph_extractor.snippet_graph_constructor import (
     ROOT_NODE_ID,
     SnippetGraphConstructor,
 )
-from document_graph.models import (
+from document2graph.models import (
     Document,
     EdgeWeightConfig,
     ImageSnippetNode,

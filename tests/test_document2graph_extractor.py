@@ -4,8 +4,8 @@ import networkx as nx
 import pytest
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
 from docling.datamodel.pipeline_options import PdfPipelineOptions
-from document_graph.document_graph_extractor import DocumentGraphExtractor
-from document_graph.models import ExtractorConfig
+from document2graph.document2graph_extractor import DocumentGraphExtractor
+from document2graph.models import ExtractorConfig
 
 PDF_DIR = "tests/.test-pdf/"
 
@@ -27,7 +27,7 @@ def config(tmp_path) -> ExtractorConfig:
 
 @pytest.mark.slow
 @pytest.mark.skipif(not os.path.isdir(PDF_DIR), reason="test PDFs not available")
-def test_document_graph_extractor(config: ExtractorConfig):
+def test_document2graph_extractor(config: ExtractorConfig):
     extractor = DocumentGraphExtractor(config)
     snippets = extractor.generate_snippets(return_snippets=True)
 
@@ -54,7 +54,7 @@ def test_document_graph_extractor(config: ExtractorConfig):
 
 @pytest.mark.slow
 @pytest.mark.skipif(not os.path.isdir(PDF_DIR), reason="test PDFs not available")
-def test_document_graph_is_connected_and_weighted(config: ExtractorConfig):
+def test_document2graph_is_connected_and_weighted(config: ExtractorConfig):
     extractor = DocumentGraphExtractor(config)
     extractor.generate_snippets()
 
@@ -68,4 +68,4 @@ def test_document_graph_is_connected_and_weighted(config: ExtractorConfig):
 
 
 if __name__ == "__main__":
-    pytest.main(["-v", "tests/test_document_graph_extractor.py"])
+    pytest.main(["-v", "tests/test_document2graph_extractor.py"])

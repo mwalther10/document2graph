@@ -1,4 +1,4 @@
-# Document to Graph Extractor
+# document2graph
 
 Extract hierarchical document graphs and baseline chunks from PDF files. The package parses PDFs using [Docling](https://github.com/DS4SD/docling) and produces two complementary representations:
 
@@ -32,7 +32,7 @@ Requires Python 3.11+.
 Both extractors share the same `ExtractorConfig`:
 
 ```python
-from document_graph.models import ExtractorConfig
+from document2graph.models import ExtractorConfig
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 
 config = ExtractorConfig(
@@ -51,7 +51,7 @@ located inside each PDF. Each field is described by a search string and an inclu
 to search on. Fields set to `None` are skipped.
 
 ```python
-from document_graph.models import ExtractorConfig, MetadataExtractionConfig, MetadataFieldConfig
+from document2graph.models import ExtractorConfig, MetadataExtractionConfig, MetadataFieldConfig
 
 config = ExtractorConfig(
     pdf_path="data/pdfs/",
@@ -76,7 +76,7 @@ Every edge in the document graph carries a `weight` attribute reflecting the str
 structural connection. The defaults can be overridden per category via `edge_weights`:
 
 ```python
-from document_graph.models import ExtractorConfig, EdgeWeightConfig
+from document2graph.models import ExtractorConfig, EdgeWeightConfig
 
 config = ExtractorConfig(
     pdf_path="data/pdfs/",
@@ -115,7 +115,7 @@ print(doc.metadata.version)
 Processes every PDF in `pdf_path` and builds a NetworkX graph per document.
 
 ```python
-from document_graph.document_graph_extractor import DocumentGraphExtractor
+from document2graph.document2graph_extractor import DocumentGraphExtractor
 
 extractor = DocumentGraphExtractor(config)
 
@@ -150,7 +150,7 @@ G = nx.read_gexf("data/output/nx_graphs/my_document.gexf")
 Produces flat, retrieval-ready chunks using Docling's hybrid chunker.
 
 ```python
-from document_graph.baseline_extractor import BaselineExtractor
+from document2graph.baseline_extractor import BaselineExtractor
 
 extractor = BaselineExtractor(config)
 
