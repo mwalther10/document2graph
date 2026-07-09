@@ -1,0 +1,14 @@
+docling
+docling-core
+docling-parse
+numpy
+pydantic>=2
+regex
+networkx
+coloredlogs
+tqdm
+transformers
+
+[dev]
+pytest
+httpx

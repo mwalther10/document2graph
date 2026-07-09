@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "document-graph"
+name = "document2graph"
 version = "0.1.0"
 description = "Extract hierarchical document graphs and baseline chunks from PDF"
 readme = "README.md"
