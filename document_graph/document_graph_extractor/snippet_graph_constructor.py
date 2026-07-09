@@ -1,9 +1,8 @@
-from docling_core.types.doc.document import TextItem, SectionHeaderItem, PictureItem, TableItem, DocItem, RefItem, DoclingDocument
+from docling_core.types.doc.document import TextItem, SectionHeaderItem, PictureItem, TableItem, RefItem, DoclingDocument
 from docling_parse.pdf_parser import PdfDocument
 from docling_core.types.doc.page import TextCellUnit
 import numpy as np
 from collections import defaultdict
-import matplotlib.pyplot as plt
 import regex as re
 import networkx as nx
 from ..models.TextSnippet import TextSnippet
@@ -11,6 +10,8 @@ from ..models.TextSnippetNode import TextSnippetNode
 from ..models.ImageSnippetNode import ImageSnippetNode
 from ..models.TableSnippetNode import TableSnippetNode
 from ..models.Document import Document
+from ..models.DocumentMetadata import DocumentMetadata, MetadataExtractionConfig
+from ..models.EdgeWeightConfig import EdgeWeightConfig
 import uuid
 from typing import TypeVar
 
@@ -18,16 +19,22 @@ from ..utils.doc_to_tree_lib import get_heights, get_height_hist, get_text_body_
 
 T = TypeVar('T', bound=ImageSnippetNode)
 
+ROOT_NODE_ID = "#/document-root"
+
+SnippetNode = TextSnippetNode | ImageSnippetNode | TableSnippetNode
+WeightedEdge = tuple[str, str, float]
+
 class SnippetGraphConstructor():
-    
-    def __init__(self, pdf_doc: PdfDocument, docling_doc: DoclingDocument, filename: str, document_type: str):
+
+    def __init__(self, pdf_doc: PdfDocument, docling_doc: DoclingDocument, filename: str, document_type: str, metadata_config: MetadataExtractionConfig | None = None, edge_weights: EdgeWeightConfig | None = None):
         self.pdf_doc = pdf_doc
         self.docling_doc = docling_doc
+        self.edge_weights = edge_weights or EdgeWeightConfig()
         self.text_items = [TextSnippet(text_item=item, line_heights=self.add_line_heights(item)) for item in docling_doc.texts]
         self.table_items = docling_doc.tables
         self.image_items = docling_doc.pictures
         self.heights = get_heights(self.text_items, skip_first_page=True)
-        self._document_metadata = self.extract_doc_metadata_praxisempfehlungen(filename, document_type)
+        self._document_metadata = self.extract_doc_metadata(filename, document_type, metadata_config or MetadataExtractionConfig())
         self.section_header_levels, self.section_level_to_label, self.text_body_levels, self.text_level_to_label = self.compute_doc_levels()  # compute document levels once and pass to methods that need it
     
     # document metadata extraction methods can be added here
@@ -297,17 +304,20 @@ class SnippetGraphConstructor():
                 return node
         return None
     
-    def write_nx_graph(self, filename: str, text_nodes: list[TextSnippetNode], image_nodes: list[ImageSnippetNode], table_nodes: list[TableSnippetNode], edges: list[tuple[str, str]]):
+    def write_nx_graph(self, filename: str, text_nodes: list[TextSnippetNode], image_nodes: list[ImageSnippetNode], table_nodes: list[TableSnippetNode], edges: list[WeightedEdge]):
+        nx_graph = self.build_nx_graph(text_nodes, image_nodes, table_nodes, edges)
+        nx.write_gexf(nx_graph, filename, version="1.3")
+        return nx_graph
+
+    def build_nx_graph(self, text_nodes: list[TextSnippetNode], image_nodes: list[ImageSnippetNode], table_nodes: list[TableSnippetNode], edges: list[WeightedEdge]) -> nx.DiGraph:
         nx_graph = nx.DiGraph()
-        all_nodes = text_nodes + image_nodes + table_nodes
+        nx_graph.add_node(ROOT_NODE_ID, label="document_root", level=-1, level_label="Root", text=self._document_metadata.title)
         for node in text_nodes:
             nx_graph.add_node(node.snippet_id, label=node.label, level=node.level, level_label=node.level_label, text=node.text)
         for node in image_nodes + table_nodes:
-            nx_graph.add_node(node.snippet_id,label=node.label, level= node.level, level_label=node.level_label, text=node.caption_text)
-        for node in all_nodes:
-            if node.parent_id != "placeholder" and node.parent_id is not None:
-                nx_graph.add_edge(node.parent_id, node.snippet_id)
-        nx.write_gexf(nx_graph, filename, version="1.3")
+            nx_graph.add_node(node.snippet_id, label=node.label, level=node.level, level_label=node.level_label, text=node.caption_text)
+        for parent_id, child_id, weight in edges:
+            nx_graph.add_edge(parent_id, child_id, weight=weight)
         return nx_graph
 
     def construct_snippet_nodes(self) -> tuple[list[TextSnippetNode], list[ImageSnippetNode], list[TableSnippetNode]]:
@@ -317,17 +327,60 @@ class SnippetGraphConstructor():
         table_nodes = self.compute_table_nodes(self.table_items, text_nodes)  # add markdownserialization to caption text for better matching
         return text_nodes, image_nodes, table_nodes
 
-    def construct_snippet_edges(self, nodes: list[TextSnippetNode | ImageSnippetNode | TableSnippetNode]) -> list[tuple[str, str]]:
+    def compute_edge_weight(self, parent: SnippetNode | None, child: SnippetNode) -> float:
+        weights = self.edge_weights
+        if isinstance(child, (ImageSnippetNode, TableSnippetNode)):
+            if child.level_label == "Unreferenced Image":
+                return weights.unreferenced_media
+            return weights.media
+        if child.is_grouped:
+            return weights.list_item
+        if child.level_label in ("Title", "Heading") and parent is not None and parent.level_label in ("Title", "Heading"):
+            return weights.section
+        return weights.text
+
+    def construct_snippet_edges(self, nodes: list[SnippetNode]) -> list[WeightedEdge]:
+        """Build weighted parent->child edges; nodes without a resolvable parent attach to the document root."""
+        node_by_id = {node.snippet_id: node for node in nodes}
         edges = []
         for node in nodes:
-            if node.parent_id:
-                edges.append((node.parent_id, node.snippet_id))
+            parent = node_by_id.get(node.parent_id) if node.parent_id else None
+            if parent is not None:
+                edges.append((parent.snippet_id, node.snippet_id, self.compute_edge_weight(parent, node)))
+            else:
+                # missing or dangling parent_id: attach to the synthetic document root
+                edges.append((ROOT_NODE_ID, node.snippet_id, self.edge_weights.root))
         return edges
-    
-    def get_graph(self, save_to="") -> tuple[list[TextSnippetNode], list[ImageSnippetNode], list[TableSnippetNode], list[tuple[str, str]]]:
+
+    def connect_components(self, nodes: list[SnippetNode], edges: list[WeightedEdge]) -> list[WeightedEdge]:
+        """Attach every weakly connected component that does not reach the document root to it.
+
+        construct_snippet_edges already links orphan nodes to the root, but parent
+        cycles can still leave a component detached; this guarantees a single
+        connected graph per document.
+        """
+        graph = nx.DiGraph()
+        graph.add_node(ROOT_NODE_ID)
+        graph.add_nodes_from(node.snippet_id for node in nodes)
+        graph.add_edges_from((p, c) for p, c, _ in edges)
+        node_by_id = {node.snippet_id: node for node in nodes}
+        extra_edges = []
+        for component in nx.weakly_connected_components(graph):
+            if ROOT_NODE_ID in component:
+                continue
+            component_nodes = [node_by_id[n] for n in component if n in node_by_id]
+            if not component_nodes:
+                continue
+            # attach the structurally highest node of the component to the root
+            top = min(component_nodes, key=lambda n: (n.level, n.sequence_no))
+            extra_edges.append((ROOT_NODE_ID, top.snippet_id, self.edge_weights.root))
+        return extra_edges
+
+    def get_graph(self, save_to="") -> tuple[list[TextSnippetNode], list[ImageSnippetNode], list[TableSnippetNode], list[WeightedEdge]]:
         text_nodes, image_nodes, table_nodes = self.construct_snippet_nodes()
-        all_nodes = text_nodes + image_nodes + table_nodes
+        all_nodes: list[SnippetNode] = text_nodes + image_nodes + table_nodes
         edges = self.construct_snippet_edges(all_nodes)
+        edges += self.connect_components(all_nodes, edges)
         if save_to != "":
             self.write_nx_graph(save_to, text_nodes, image_nodes, table_nodes, edges)
         return text_nodes, image_nodes, table_nodes, edges
@@ -340,40 +393,32 @@ class SnippetGraphConstructor():
                 title = snippet
         return title.text_item.text if title else ""
 
-    def extract_doc_metadata_praxisempfehlungen(self, filename: str, document_type: str) -> Document:
-        # rule 1: all metadata is on first two pages
-        # first, get version of Praxisempfehlungen (found on first page)
-        version = None
-        authors = None
-        institutions = None
-        bibliography = None
-        correspondence = None
+    def extract_doc_metadata(self, filename: str, document_type: str, config: MetadataExtractionConfig) -> Document:
+        metadata_values: dict[str, str] = {}
+        for field_name in ["version", "authors", "institutions", "bibliography", "correspondence"]:
+            field_cfg = getattr(config, field_name)
+            if field_cfg is None:
+                metadata_values[field_name] = ""
+                continue
+            page_items = [item.text_item for item in self.text_items
+                          if field_cfg.pages[0] <= item.text_item.prov[0].page_no <= field_cfg.pages[1]]
+            matched_ref = None
+            for text_item in page_items:
+                if self.__safe_check_substring(field_cfg.label, text_item):
+                    matched_ref = self.__match_metadata_by_section_header(text_item, page_items)
+                    if matched_ref is None:
+                        matched_ref = text_item.get_ref()
+                    break
+            metadata_values[field_name] = matched_ref.cref if matched_ref else ""
 
-        page_one = [item.text_item for item in self.text_items if item.text_item.prov[0].page_no == 1]
-        page_two_text_snippets = [item for item in self.text_items if item.text_item.prov[0].page_no == 2]
-        title = self.extract_title(page_two_text_snippets)
-        page_two = [item.text_item for item in self.text_items if item.text_item.prov[0].page_no == 2]
-        for text_item in page_one:
-            if self.__safe_check_substring("version", text_item):
-                version = text_item.get_ref()
+        title_page_snippets = [item for item in self.text_items
+                               if item.text_item.prov[0].page_no == config.title_page]
+        title = self.extract_title(title_page_snippets) if title_page_snippets else ""
 
-        for text_item in page_two:
-            if self.__safe_check_substring("korrespondenzadresse", text_item):
-                authors = self.__match_metadata_by_section_header(text_item, page_two)
-            if self.__safe_check_substring("institute", text_item):
-                institutions = self.__match_metadata_by_section_header(text_item, page_two)
-            if self.__safe_check_substring("bibliografie", text_item):
-                bibliography = self.__match_metadata_by_section_header(text_item, page_two)
-            if self.__safe_check_substring("korrespondenzadresse", text_item):
-                correspondence = self.__match_metadata_by_section_header(text_item, page_two)
         return Document(
             document_id=str(uuid.uuid4()),
             title=title,
-            document_version=version.cref if version else "",
             document_type=document_type,
             filename=filename,
-            authors=authors.cref if authors else "",
-            institutions=institutions.cref if institutions else "",
-            bibliography=bibliography.cref if bibliography else "",
-            correspondence=correspondence.cref if correspondence else ""
+            metadata=DocumentMetadata(**metadata_values),
         )

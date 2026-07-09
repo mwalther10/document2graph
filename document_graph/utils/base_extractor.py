@@ -1,4 +1,5 @@
-from docling.document_converter import DocumentConverter
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.base_models import InputFormat
 from docling_core.types.doc.document import DoclingDocument, TableItem, TextItem, PictureItem
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling_core.types.doc.document import GroupItem, RefItem
@@ -9,12 +10,9 @@ from .log import Log
 class Extractor:
     def __init__(self, source: str, pipeline_options: PdfPipelineOptions = PdfPipelineOptions()):
         self.source = source
-        # self.converter = DocumentConverter( format_options={
-        #     InputFormat.PDF: PdfFormatOption(
-        #         pipeline_options=pipeline_options
-        #     )
-        # })
-        self.converter = DocumentConverter()
+        self.converter = DocumentConverter(format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+        })
         self.docling_doc = self.converter.convert(source)
         self.doc = self.docling_doc.document
 

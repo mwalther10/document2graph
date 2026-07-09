@@ -1,3 +1,38 @@
+Metadata-Version: 2.4
+Name: document-graph
+Version: 0.1.0
+Summary: Extract hierarchical document graphs and baseline chunks from PDF
+Author-email: Marina Walther <marina.walther@gmail.com>
+License: MIT
+Project-URL: Homepage, https://github.com/mwalther10/document-graph
+Project-URL: Issues, https://github.com/mwalther10/document-graph/issues
+Keywords: pdf,document-graph,docling,networkx,chunking,retrieval
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Text Processing :: Indexing
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: docling
+Requires-Dist: docling-core
+Requires-Dist: docling-parse
+Requires-Dist: numpy
+Requires-Dist: pydantic>=2
+Requires-Dist: regex
+Requires-Dist: networkx
+Requires-Dist: coloredlogs
+Requires-Dist: tqdm
+Requires-Dist: transformers
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: httpx; extra == "dev"
+Dynamic: license-file
+
 # Document Graph Extractor
 
 Extract hierarchical document graphs and baseline chunks from PDF files. The package parses PDFs using [Docling](https://github.com/DS4SD/docling) and produces two complementary representations:

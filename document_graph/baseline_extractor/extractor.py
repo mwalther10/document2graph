@@ -4,12 +4,9 @@ import uuid
 from ..utils.hybrid_chunker_extractor import HybridChunkerExtractor
 from tqdm import tqdm
 import json
-from docling_parse.pdf_parser import DoclingPdfParser, PdfDocument
-from docling.datamodel.pipeline_options import PdfPipelineOptions
 from ..models.Chunk import Chunk
 from ..models.ExtractorConfig import ExtractorConfig
-from typing import Any, List, Sequence, cast
-from docling_core.transforms.chunker.base import BaseChunk
+from typing import List
 
 from ..utils.log import Log
 

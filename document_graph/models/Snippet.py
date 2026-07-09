@@ -1,7 +1,6 @@
 from pydantic import BaseModel
 from docling_core.types.doc.document import RefItem
 from docling_core.types.doc.base import BoundingBox
-from typing import Sequence
 
 class Snippet(BaseModel):
     snippet_id: str

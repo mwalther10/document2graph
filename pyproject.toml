@@ -7,19 +7,36 @@ name = "document-graph"
 version = "0.1.0"
 description = "Extract hierarchical document graphs and baseline chunks from PDF"
 readme = "README.md"
-license = {text = "GPL-3.0"}
+license = {text = "MIT"}
 authors = [{name = "Marina Walther", email = "marina.walther@gmail.com"}]
 requires-python = ">=3.11"
+keywords = ["pdf", "document-graph", "docling", "networkx", "chunking", "retrieval"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Indexing",
+]
 dependencies = [
     "docling",
+    "docling-core",
     "docling-parse",
     "numpy",
-    "matplotlib",
+    "pydantic>=2",
     "regex",
     "networkx",
     "coloredlogs",
+    "tqdm",
     "transformers",
 ]
+
+[project.urls]
+Homepage = "https://github.com/mwalther10/document-graph"
+Issues = "https://github.com/mwalther10/document-graph/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]

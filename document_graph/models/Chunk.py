@@ -1,6 +1,4 @@
 from pydantic import BaseModel
-from docling_core.types.doc.document import RefItem
-from docling_core.types.doc.base import BoundingBox
 from typing import Any, Sequence
 
 class Chunk(BaseModel):

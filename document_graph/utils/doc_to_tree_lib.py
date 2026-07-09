@@ -1,5 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as plt
 
 # schemas
 from ..models.TextSnippet import TextSnippet
@@ -18,6 +17,8 @@ def get_height_hist(heights=np.array, plot=False) -> dict[int, int]:
         unique_heights, counts = np.unique(heights, return_counts=True)
         height_hist = dict(zip(unique_heights, counts))
         if plot:
+            # matplotlib is only needed for this debug plot, not a package dependency
+            import matplotlib.pyplot as plt
             plt.bar(height_hist.keys(), height_hist.values()) # type: ignore
             xticks = unique_heights[::max(1, len(unique_heights)//20)]
             plt.xticks(xticks, rotation=90, size=6)
