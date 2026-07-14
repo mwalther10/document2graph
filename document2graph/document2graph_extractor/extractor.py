@@ -50,16 +50,18 @@ class DocumentGraphExtractor:
             metadata_config=self.metadata_config,
             edge_weights=self.edge_weights,
         )
-        text_nodes, image_nodes, table_nodes, edges = snippet_to_graph.get_graph(
+        graph = snippet_to_graph.get_graph(
             save_to=f"{graph_save_dir}/{clean_filename}.gexf"
         )
         doc_metadata = snippet_to_graph.document_metadata
 
         return {
-            "text_nodes": text_nodes,
-            "image_nodes": image_nodes,
-            "table_nodes": table_nodes,
-            "edges": edges,
+            "text_nodes": graph.text_nodes,
+            "image_nodes": graph.image_nodes,
+            "table_nodes": graph.table_nodes,
+            "edges": graph.edges,
+            "reference_edges": graph.reference_edges,
+            "root_id": graph.root_id,
             "document_metadata": doc_metadata,
             "clean_filename": clean_filename
         }
@@ -68,7 +70,11 @@ class DocumentGraphExtractor:
         """Process a single PDF and return its graph components.
 
         Returns a dict with keys: text_nodes, image_nodes, table_nodes,
-        edges (list of (parent_id, child_id, weight) tuples),
+        edges (hierarchy tree, list of (parent_id, child_id, weight) tuples),
+        reference_edges (mentioning text -> media item, same tuple shape,
+        not part of the tree),
+        root_id (snippet_id of the document root: the title node, or the
+        synthetic root if no title node was found),
         document_metadata, clean_filename.
         """
         return self._run(filename)

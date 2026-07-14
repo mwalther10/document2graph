@@ -39,5 +39,6 @@ class EdgeWeightConfig(BaseModel):
     list_item: float = 0.6          # anchor text -> grouped list item (bullets)
     media: float = 0.9              # referencing text -> image/table (matched via caption)
     unreferenced_media: float = 0.3 # fallback heading -> image/table without a caption match
+    reference: float = 0.7          # mentioning text -> image/table (one edge per mention, outside the hierarchy tree)
     root: float = 0.1               # synthetic document root -> otherwise disconnected node
     relevancy: RelevancyWeightConfig = Field(default_factory=RelevancyWeightConfig)

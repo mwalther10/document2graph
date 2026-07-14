@@ -115,13 +115,3 @@ class Extractor:
         with open(f"{save_dir}/{filename}_serialized_doc.pkl", "wb") as f:
             pickle.dump(result, f)
         return result
-
-
-def main():
-    # only for quick testing
-    source = "../pdf/ddg_pdf/ddg_praxisempfehlungen/DuS_2024_S02_Praxisempfehlungen_Aberle_Adipositas-und-Diabetes.pdf"
-    extractor = Extractor(source)
-    _ = extractor.extract("test", "test")
-
-if __name__ == "__main__":
-    main()

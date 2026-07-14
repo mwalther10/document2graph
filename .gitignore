@@ -4,3 +4,11 @@ __pycache__/
 dist/
 build/
 .*/*.egg-info/
+
+*.DS_Store
+.env
+tests/.test-data/*
+tests/.test-data/**/*
+tests/.test-pdf/*
+tests/.test-pdf/**/*
+tests/.test-pdf/PE_Definition_des_Diabetes_mellitus_Update_2025.pdf

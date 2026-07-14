@@ -9,7 +9,7 @@ class MetadataFieldConfig(BaseModel):
 class MetadataExtractionConfig(BaseModel):
     title_page: int = 2
     version: MetadataFieldConfig | None = MetadataFieldConfig(label="version", pages=(1, 1))
-    authors: MetadataFieldConfig | None = MetadataFieldConfig(label="korrespondenzadresse", pages=(2, 2))
+    authors: MetadataFieldConfig | None = MetadataFieldConfig(label="autoren", pages=(2, 2))
     institutions: MetadataFieldConfig | None = MetadataFieldConfig(label="institute", pages=(2, 2))
     bibliography: MetadataFieldConfig | None = MetadataFieldConfig(label="bibliografie", pages=(2, 2))
     correspondence: MetadataFieldConfig | None = MetadataFieldConfig(label="korrespondenzadresse", pages=(2, 2))
