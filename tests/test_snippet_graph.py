@@ -92,7 +92,7 @@ def test_orphans_and_dangling_parents_attach_to_root(constructor: SnippetGraphCo
     dangling = make_text_node(2, level=2, level_label="Body", parent_id="#/does/not/exist")
     nodes = [heading, body, dangling]
 
-    edges = constructor.construct_snippet_edges(nodes)
+    edges = constructor.construct_snippet_edges(nodes, root_id=ROOT_NODE_ID)
 
     assert (ROOT_NODE_ID, heading.snippet_id, constructor.edge_weights.root) in edges
     assert (heading.snippet_id, body.snippet_id, constructor.edge_weights.text) in edges
@@ -109,8 +109,8 @@ def test_graph_is_connected(constructor: SnippetGraphConstructor):
     cycle_b = make_text_node(3, level=2, level_label="Body", parent_id="#/texts/2")
     nodes = [heading, body, cycle_a, cycle_b]
 
-    edges = constructor.construct_snippet_edges(nodes)
-    edges += constructor.connect_components(nodes, edges)
+    edges = constructor.construct_snippet_edges(nodes, root_id=ROOT_NODE_ID)
+    edges += constructor.connect_components(nodes, edges, root_id=ROOT_NODE_ID)
     graph = constructor.build_nx_graph([heading, body, cycle_a, cycle_b], [], [], edges)
 
     assert nx.is_weakly_connected(graph)

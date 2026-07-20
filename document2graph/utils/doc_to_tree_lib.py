@@ -3,11 +3,8 @@ import numpy as np
 # schemas
 from ..models.TextSnippet import TextSnippet
 
-def get_heights(text_items: list[TextSnippet], skip_first_page: bool = False) -> np.ndarray:
-    if skip_first_page:
-        heights = [height for snippet in text_items for height in snippet.line_heights if snippet.text_item.prov[0].page_no > 1]
-    else:
-        heights = [height for snippet in text_items for height in snippet.line_heights]
+def get_heights(text_items: list[TextSnippet]) -> np.ndarray:
+    heights = [height for snippet in text_items for height in snippet.line_heights]
     return np.multiply(np.round(np.array(heights), 1), 10)
 
 def get_height_hist(heights=np.array, plot=False) -> dict[int, int]:

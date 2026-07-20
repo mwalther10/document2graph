@@ -175,7 +175,7 @@ def _write_graph_to_neo4j(driver, doc_graph: DocumentGraph) -> None:
             {"parent": parent, "child": child, "weight": weight}
             for parent, child, weight in doc_graph.edges
         ]
-        with driver.session(database="test") as session:
+        with driver.session() as session:
             session.run(
                 "MERGE (d:Document {document_id: $document_id}) "
                 "SET d.filename = $filename, d.title = $title, "

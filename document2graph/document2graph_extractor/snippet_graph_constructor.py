@@ -58,11 +58,11 @@ class SnippetGraphConstructor():
         self.docling_doc = docling_doc
         self.edge_weights = edge_weights or EdgeWeightConfig()
         self.logger = Log("SnippetGraphConstructor").logger
-        self.text_items = [TextSnippet(text_item=item, line_heights=self.add_line_heights(item)) for item in docling_doc.texts]
+        self.text_items = [TextSnippet(text_item=item, line_heights=self.add_line_heights(item)) for item in docling_doc.texts if item.label not in ("page_footer", "page_header")]
         self.table_items = docling_doc.tables
         self.image_items = self.filter_decorative_pictures(docling_doc.pictures)
         self._document_metadata = DocumentMetadataExtractor(self.text_items).extract(filename, document_type, metadata_config or MetadataExtractionConfig())
-        self.levels = LevelClassifier(self.text_items)
+        self.levels = LevelClassifier(self.text_items, self._document_metadata.title)
 
     @property
     def document_metadata(self):
@@ -126,6 +126,9 @@ class SnippetGraphConstructor():
     def compute_text_nodes(self, snippets: list[TextSnippet]) -> list[TextSnippetNode]:
         nodes = []
         for i, snippet in enumerate(snippets):
+            if snippet.text_item.label in ("page_footer", "page_header"):
+                self.logger.debug(f"Skipping text snippet {snippet.text_item.self_ref} with label {snippet.text_item.label}.")
+                continue
             snippet_level, snippet_level_label = self.levels.classify(snippet)
             assert snippet.text_item.parent is not None, f"Text item {snippet.text_item.text} has no parent reference."
             node = TextSnippetNode(

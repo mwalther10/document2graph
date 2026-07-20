@@ -1,7 +1,7 @@
 import numpy as np
 from collections import defaultdict
 
-from docling_core.types.doc.document import SectionHeaderItem
+from docling_core.types.doc.document import SectionHeaderItem # type: ignore
 
 from ..models.TextSnippet import TextSnippet
 from ..utils.doc_to_tree_lib import get_heights, get_height_hist, get_text_body_height, compute_snippet_level
@@ -11,9 +11,10 @@ class LevelClassifier:
     """Derives hierarchy levels from font heights: section headers get the top levels
     (largest fonts first), body text and sub-/footnote text continue below them."""
 
-    def __init__(self, text_items: list[TextSnippet]):
+    def __init__(self, text_items: list[TextSnippet], title: str | None = None):
         self.text_items = text_items
-        self.heights = get_heights(text_items, skip_first_page=True)
+        self.title = title
+        self.heights = get_heights(text_items)
         self.section_header_levels, self.section_level_to_label = self._compute_section_header_levels()
         num_section_headers = max(self.section_header_levels.values(), default=-1) + 1
         self.text_body_levels, self.text_level_to_label = self._compute_text_body_levels(num_section_headers)
@@ -21,6 +22,8 @@ class LevelClassifier:
     def classify(self, snippet: TextSnippet) -> tuple[int, str]:
         """Return (level, level_label) for a text snippet."""
         if isinstance(snippet.text_item, SectionHeaderItem):
+            if snippet.text_item.text == self.title:
+                return 0, "Title"
             level = compute_snippet_level(snippet, self.section_header_levels)
             return level, self.section_level_to_label.get(level, "unknown")
         level = compute_snippet_level(snippet, self.text_body_levels)
@@ -28,34 +31,41 @@ class LevelClassifier:
 
     def header_levels(self) -> set[int]:
         """Levels that belong to section headers (incl. the title)."""
-        return set(self.section_header_levels.values())
+        return set(self.section_level_to_label.keys())
 
     def _compute_section_header_levels(self) -> tuple[dict[int, int], dict[int, str]]:
         all_heights = self.heights
         if not all_heights.size:
             return {}, {}
         section_headers = [s for s in self.text_items if isinstance(s.text_item, SectionHeaderItem)]
-        section_header_height_hist = get_height_hist(get_heights(section_headers, skip_first_page=True))
-        unique_section_header_heights = sorted(section_header_height_hist.keys(), reverse=True)
         text_body_height, iqr = get_text_body_height(all_heights)
 
-        # group levels that are very close to each other on text body level (within iqr)
         level_dict = defaultdict(int)
         level_to_label = defaultdict(str)
-        level = 0
-        for h in unique_section_header_heights:
-            if(h >= text_body_height - iqr and h <= text_body_height + iqr):
-                level_dict[int(h)] = level  # body text headers, usually just bold printed text
-                level_to_label[level] = "Heading"
-            else:
-                level_dict[int(h)] = level
-                level_to_label[level] = "Heading"
-                level += 1
 
-        # check if largest height is unique -> title
-        if len(unique_section_header_heights) > 0 and (section_header_height_hist[unique_section_header_heights[0]] == 1):
+        # The title always occupies the top level (0) via classify(); real section
+        # headers rank below it by descending font height, starting at level 1.
+        # Title snippets are excluded from the ranking so the title's own font
+        # height never opens a header tier of its own -- otherwise that tier is a
+        # phantom level that classify() never assigns to any snippet (the title
+        # goes to level 0), leaving a gap in the header levels.
+        has_title = bool(self.title) and any(s.text_item.text == self.title for s in section_headers)
+        if has_title:
+            level = 1
             level_to_label[0] = "Title"
+            ranked_headers = [s for s in section_headers if s.text_item.text != self.title]
+        else:
+            level = 0
+            ranked_headers = section_headers
 
+        ranked_heights = get_heights(ranked_headers)
+        for h in sorted(get_height_hist(ranked_heights).keys(), reverse=True) if ranked_heights.size else []:
+            # headers within an IQR of the body height are just bold body text and
+            # share a single level; taller headers each open a new level.
+            level_dict[int(h)] = level
+            level_to_label[level] = "Heading"
+            #if not (text_body_height - iqr <= h <= text_body_height + iqr):
+            level += 1
         return level_dict, level_to_label
 
     def _compute_text_body_levels(self, num_section_headers: int) -> tuple[dict[int, int], dict[int, str]]:
@@ -63,9 +73,9 @@ class LevelClassifier:
         if not all_heights.size:
             return {}, {}
 
-        texts = [s for s in self.text_items if not isinstance(s.text_item, SectionHeaderItem)]
+        texts = [s for s in self.text_items if not isinstance(s.text_item, SectionHeaderItem) and not (s.text_item.label == "page_footer" or s.text_item.label == "page_header")]
 
-        text_body_heights = get_heights(texts, skip_first_page=True)
+        text_body_heights = get_heights(texts) 
         text_body_height_hist = get_height_hist(text_body_heights)
         unique_text_body_heights = sorted(text_body_height_hist.keys(), reverse=True)
         text_body_height, iqr = get_text_body_height(all_heights)
