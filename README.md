@@ -219,7 +219,7 @@ chunks = extractor.extract_baseline_chunks(
 
 | Model | Key fields |
 |---|---|
-| `Snippet` | `snippet_id`, `type` (text/image/table), `document_id`, `sequence_no`, `label`, `level`, `page_no`, `bbox`, `text` |
+| `Snippet` | `snippet_id`, `type` (text/image/table), `document_id`, `sequence_no`, `label`, `level`, `region` (body/front_matter/sidebar/figure), `page_no`, `bbox`, `text` |
 | `Chunk` | `chunk_id`, `document_id`, `text`, `meta`, `baseline_description`, `embedding` |
 | `Document` | `document_id`, `document_type`, `filename`, `title`, `metadata: DocumentMetadata` |
 | `DocumentMetadata` | `version`, `authors`, `institutions`, `bibliography`, `correspondence` |

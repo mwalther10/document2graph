@@ -57,6 +57,9 @@ class Snippet(BaseModel):
     bbox: dict | None = None
     text: str
     snippet_type: str = "text"
+    line_heights: list[float] = []
+    font_key: str | None = None
+    level_height: float | None = None
     extracted_at: str
 
 
@@ -101,6 +104,9 @@ def _to_document_graph(
                     bbox=node.bbox.model_dump(mode="json") if node.bbox is not None else None,
                     text=text,
                     snippet_type=snippet_type,
+                    line_heights=getattr(node, "line_heights", []),
+                    font_key=getattr(node, "font_key", None),
+                    level_height=getattr(node, "level_height", None),
                     extracted_at=extracted_at,
                 )
             )
@@ -167,6 +173,9 @@ def _write_graph_to_neo4j(driver, doc_graph: DocumentGraph) -> None:
                 "level_label": s.level_label,
                 "page_no": s.page_no,
                 "snippet_type": s.snippet_type,
+                "line_heights": s.line_heights,
+                "font_key": s.font_key or "",
+                "level_height": s.level_height if s.level_height is not None else -1.0,
                 "text_preview": s.text[:100] if s.text else "",
             }
             for s in doc_graph.snippets

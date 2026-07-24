@@ -69,10 +69,28 @@ def print_summary(constructor: SnippetGraphConstructor, graph) -> None:
     print(f"title:    {meta.title!r}")
     print(f"metadata: {meta.metadata.model_dump()}")
 
-    print("\n=== Level tables (height*10 -> level) ===")
+    print("\n=== Page regions ===")
+    region_counts: dict[str, int] = {}
+    for node in graph.text_nodes:
+        region_counts[node.region] = region_counts.get(node.region, 0) + 1
+    for region, count in sorted(region_counts.items(), key=lambda kv: -kv[1]):
+        print(f"{count:5d}  {region}")
+
+    print("\n=== Heading styles (font, height) -> level ===")
     levels = constructor.levels
-    print(f"section headers: {dict(levels.section_header_levels)}  labels: {dict(levels.section_level_to_label)}")
-    print(f"text body:       {dict(levels.text_body_levels)}  labels: {dict(levels.text_level_to_label)}")
+    headings = [n for n in graph.text_nodes if n.level in levels.header_levels()]
+    by_style: dict[tuple[str, int, str], list[str]] = {}
+    for node in headings:
+        key = (node.font_key or "-", node.level, node.region)
+        by_style.setdefault(key, []).append(node.text)
+    for (font, level, region), texts in sorted(by_style.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        print(f"  L{level} {font:6} {region:12} n={len(texts):3}  {[t[:34] for t in texts[:3]]}")
+    print(f"\ntext body levels: {dict(levels.text_body_levels)}  labels: {dict(levels.text_level_to_label)}")
+
+    print("\n=== Heading tree ===")
+    for node in sorted(headings, key=lambda n: n.sequence_no):
+        marker = "" if node.region == "body" else f" [{node.region}]"
+        print(f"  {'  ' * node.level}L{node.level}{marker} {node.text[:78]}")
 
     print("\n=== Root ===")
     if graph.root_id == ROOT_NODE_ID:

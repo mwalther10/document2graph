@@ -110,6 +110,7 @@ class DocumentGraphExtractor:
             level_label=node.level_label,
             parent_id=node.parent_id,
             is_grouped=node.is_grouped,
+            region=getattr(node, "region", "body"),
             page_no=node.page_no,
             bbox=node.bbox,
             text=text_value,
