@@ -205,6 +205,27 @@ chunks = extractor.extract_baseline_chunks(
 )
 ```
 
+#### Chunker settings
+
+`max_tokens` bounds the size of a baseline chunk and should match the context
+window of the model that later embeds it — set it too high and the chunker
+emits chunks the retriever silently truncates. `tokenizer` only determines how
+chunk length is measured, so it should be the tokenizer of that same model.
+
+```python
+from document2graph.models import ExtractorConfig, ChunkerConfig
+
+config = ExtractorConfig(
+    pdf_path="./pdfs",
+    data_path="./data",
+    chunker=ChunkerConfig(
+        tokenizer="intfloat/multilingual-e5-large",
+        max_tokens=512,
+        merge_peers=True,   # merge adjacent chunks under one heading while they fit
+    ),
+)
+```
+
 ## Output structure
 
 ```
@@ -225,6 +246,7 @@ chunks = extractor.extract_baseline_chunks(
 | `DocumentMetadata` | `version`, `authors`, `institutions`, `bibliography`, `correspondence` |
 | `MetadataExtractionConfig` | `title_page`, `version`, `authors`, `institutions`, `bibliography`, `correspondence` (each a `MetadataFieldConfig`) |
 | `MetadataFieldConfig` | `label` (search string), `pages` (inclusive 1-based page range, e.g. `(1, 3)`) |
+| `ChunkerConfig` | `tokenizer` (HF tokenizer name), `max_tokens`, `merge_peers` |
 | `EdgeWeightConfig` | `section`, `text`, `list_item`, `media`, `unreferenced_media`, `root` (edge weights by category), `relevancy: RelevancyWeightConfig` |
 | `RelevancyWeightConfig` | `enabled`, `metric` (bm25/embedding/blend), `embedding_model`, `alpha`, `bm25_k1`, `bm25_b`, `bm25_scoring` (child_query/symmetric_mean/symmetric_max), `combination` (mean/multiply) |
 

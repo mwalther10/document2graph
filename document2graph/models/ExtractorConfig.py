@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from docling.datamodel.pipeline_options import PdfPipelineOptions
+from .ChunkerConfig import ChunkerConfig
 from .DocumentMetadata import MetadataExtractionConfig
 from .EdgeWeightConfig import EdgeWeightConfig
 
@@ -12,3 +13,4 @@ class ExtractorConfig(BaseModel):
     save_json: bool = True
     metadata_config: MetadataExtractionConfig = Field(default_factory=MetadataExtractionConfig)
     edge_weights: EdgeWeightConfig = Field(default_factory=EdgeWeightConfig)
+    chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)

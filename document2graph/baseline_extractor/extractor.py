@@ -18,9 +18,11 @@ class BaselineExtractor:
         self.pdf_path = config.pdf_path
         self.data_path = config.data_path
         self.raw_text_save_dir = os.path.join(self.data_path, "raw_texts/")
+        self.chunk_save_dir = os.path.join(self.data_path, "baseline_chunks/")
         self.pdfPipelineOptions = config.pdfPipelineOptions
         self.save_json = config.save_json
         self.document_type = config.document_type
+        self.chunker_config = config.chunker
     
     def _get_clean_filename(self, filename: str) -> str:
         return os.path.splitext(os.path.basename(filename))[0]
@@ -31,7 +33,7 @@ class BaselineExtractor:
         clean_filename = self._get_clean_filename(sample)
         baseline_extractor = HybridChunkerExtractor(
             source=sample,
-            merge_peers=True,
+            config=self.chunker_config,
             pipeline_options=self.pdfPipelineOptions
         )
         chunks = []
@@ -70,13 +72,12 @@ class BaselineExtractor:
 
                 # by default, the chunks are saved as json
                 if self.save_json:
-                    baseline_json = os.path.join(self.data_path, "baseline_chunks/")
-                    os.makedirs(baseline_json, exist_ok=True)
-                    with open(f"{self.raw_text_save_dir}/{clean_filename}_baseline_chunks.json", "w") as f:
+                    os.makedirs(self.chunk_save_dir, exist_ok=True)
+                    with open(f"{self.chunk_save_dir}/{clean_filename}_baseline_chunks.json", "w") as f:
                         json.dump([chunk.model_dump() for chunk in chunks["baseline"]], f, indent=4)
-                        if len(chunks["enriched"]) > 0:
-                            with open(f"{self.raw_text_save_dir}/{clean_filename}_enriched_chunks.json", "w") as f:
-                                json.dump([chunk.model_dump() for chunk in chunks["enriched"]], f, indent=4)
+                    if len(chunks["enriched"]) > 0:
+                        with open(f"{self.chunk_save_dir}/{clean_filename}_enriched_chunks.json", "w") as f:
+                            json.dump([chunk.model_dump() for chunk in chunks["enriched"]], f, indent=4)
             
 
         return all_chunks if return_chunks else None
