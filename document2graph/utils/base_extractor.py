@@ -5,19 +5,48 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling_core.types.doc.document import GroupItem, RefItem
 import os
 import pickle
+from .ids import clean_filename
 from .log import Log
 
-class Extractor:
-    def __init__(self, source: str, pipeline_options: PdfPipelineOptions = PdfPipelineOptions()):
-        self.source = source
-        self.converter = DocumentConverter(format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-        })
-        self.docling_doc = self.converter.convert(source)
-        self.doc = self.docling_doc.document
 
+def docling_doc_path(cache_dir: str, source: str) -> str:
+    """Where the parsed docling document of ``source`` is cached."""
+    return os.path.join(cache_dir, f"{clean_filename(source)}_docling_doc.json")
+
+
+class Extractor:
+    """Parses a PDF with docling and serializes it for the graph builders.
+
+    The parse is by far the most expensive step, so the parsed document is
+    cached as json under ``cache_dir`` and reused: pass ``cache_dir`` to reuse
+    it, and ``refresh=True`` to re-parse and overwrite. Everything downstream of
+    this class works off the resulting ``DoclingDocument``, so ablations of
+    post-parse behaviour never need the PDF re-parsed.
+    """
+
+    def __init__(self, source: str, pipeline_options: PdfPipelineOptions | None = None,
+                 cache_dir: str | None = None, refresh: bool = False):
+        self.source = source
         self.logger = Log("Extractor").logger
-    
+        self.converter = DocumentConverter(format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options or PdfPipelineOptions())
+        })
+        self.cache_dir = cache_dir
+        self.doc = self._load_or_convert(refresh)
+
+    def _load_or_convert(self, refresh: bool) -> DoclingDocument:
+        cache_file = docling_doc_path(self.cache_dir, self.source) if self.cache_dir else None
+        if cache_file and not refresh and os.path.isfile(cache_file):
+            self.logger.info(f"Loading cached docling document from {cache_file}")
+            return DoclingDocument.load_from_json(cache_file)
+
+        self.logger.info(f"Converting {self.source} with docling (slow)...")
+        doc = self.converter.convert(self.source).document
+        if cache_file:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            doc.save_as_json(cache_file)
+        return doc
+
 
     def is_furniture(self, item):
         """
@@ -103,13 +132,13 @@ class Extractor:
         """
         Extract and serialize the document, saving intermediate results.
         """
-        self.logger.info(f"Saving parsed pdf as {filename}.json")
-
         os.makedirs(save_dir, exist_ok=True)
 
-        self.docling_doc.document.save_as_json(
-            f"{save_dir}/{filename}_docling_doc.json"
-        )
+        doc_json = f"{save_dir}/{filename}_docling_doc.json"
+        # the cache holds this file already when the document came from it
+        if not os.path.isfile(doc_json):
+            self.logger.info(f"Saving parsed pdf as {filename}.json")
+            self.doc.save_as_json(doc_json)
         self.logger.info(f"Start extracting {filename}...")
         result = self.serialize_doc(self.doc)
         with open(f"{save_dir}/{filename}_serialized_doc.pkl", "wb") as f:

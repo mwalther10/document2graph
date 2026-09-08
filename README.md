@@ -23,6 +23,9 @@ For development dependencies (pytest):
 pip install -e ".[dev]"
 ```
 
+Optional extras: `embeddings` (semantic edge weights), `neo4j` (writing graphs to a
+Neo4j instance).
+
 Requires Python 3.11+.
 
 ## Quick start
@@ -142,6 +145,52 @@ print(doc.metadata.authors)
 print(doc.metadata.version)
 ```
 
+#### Pipeline flags
+
+Graph construction repairs what the PDF parser leaves ambiguous: reading order,
+paragraphs split across columns, page regions, unlinked captions. Each step can be
+switched off individually to measure what it contributes. All of them are applied
+*after* parsing, so a sweep over several settings reuses one parse of the corpus.
+
+```python
+from document2graph.models import ExtractorConfig, PipelineFlags
+
+config = ExtractorConfig(
+    pdf_path="./pdfs",
+    data_path="./data",
+    flags=PipelineFlags(
+        repair_reading_order=True,       # sort snippets by page block instead of docling's order
+        stitch_continuations=True,       # rejoin a paragraph split across a column/page break
+        assign_regions=True,             # body / front_matter / sidebar / figure
+        recover_captions=True,           # find captions docling left unlinked to their figure
+        filter_decorative_pictures=True, # drop logos and rules
+        level_source="hybrid",           # "hybrid" | "typography" | "docling"
+    ),
+)
+```
+
+`level_source` selects how heading levels are derived:
+
+- `hybrid` (default) — headings are grouped into styles by (embedded font, height
+  cluster) and ranked by how they nest in reading order
+- `typography` — font height alone; headings of the same apparent size stay siblings
+- `docling` — docling's own `SectionHeaderItem.level`
+
+#### Parsing once
+
+Parsing a PDF is by far the most expensive step, so the parsed document is cached as
+JSON under `<data_path>/raw_texts/` and reused on the next run — by both extractors,
+so a document is parsed once no matter which representation is built first.
+
+```python
+config = ExtractorConfig(
+    pdf_path="./pdfs",
+    data_path="./data",
+    use_docling_cache=True,      # default; set False to always re-parse
+    refresh_docling_cache=False, # True re-parses and overwrites the cache
+)
+```
+
 ### Document graph extraction
 
 Processes every PDF in `pdf_path` and builds a NetworkX graph per document.
@@ -176,6 +225,68 @@ Graphs are saved as `.gexf` files under `<data_path>/nx_graphs/` and can be load
 import networkx as nx
 G = nx.read_gexf("data/output/nx_graphs/my_document.gexf")
 ```
+
+### Loading a graph back
+
+GEXF is a view for graph tools: it drops bounding boxes, page numbers, char spans and
+the table serializations. The full graph is written next to it as JSON under
+`<data_path>/graphs/` and can be read back without re-parsing the PDF — which is what
+makes it practical to run many retrieval conditions over the same corpus.
+
+```python
+from document2graph import load_graph
+
+graph = load_graph("data/output/graphs/my_document_graph.json")
+
+graph.document_id          # stable id, shared with the document's baseline chunks
+graph.root_id              # snippet_id of the document root
+for snippet in graph.snippets:
+    snippet.snippet_id     # globally unique across the corpus
+    snippet.local_ref      # the document-local docling ref, e.g. "#/texts/12"
+    snippet.parent_id      # snippet_id of the parent, or None
+    snippet.provenance     # [(page_no, bbox, charspan), ...]
+graph.edges                # [(parent snippet_id, child snippet_id, weight), ...]
+graph.reference_edges      # [(mentioning text, media item, weight), ...]
+```
+
+`DocumentGraph.from_snippet_graph(graph, document)` builds the same object from a
+`DocumentGraphExtractor.run()` result in memory; `extractor.run(...)["document_graph"]`
+returns it directly.
+
+### Writing to Neo4j
+
+Requires the `neo4j` extra. The driver and its credentials belong to the caller.
+
+```python
+from neo4j import GraphDatabase
+from document2graph import ensure_neo4j_constraints, write_graph_to_neo4j
+
+with GraphDatabase.driver(uri, auth=(user, password)) as driver:
+    ensure_neo4j_constraints(driver)   # once per database
+    write_graph_to_neo4j(driver, graph)
+```
+
+Documents become `(:Document)-[:HAS_ROOT]->(:Snippet)`, the hierarchy becomes
+`(:Snippet)-[:HAS_CHILD {weight}]->(:Snippet)` and mentions become
+`[:REFERENCES {weight}]`. Writing the same document again updates it in place: every id
+is derived deterministically from the document's name.
+
+### Identifiers and provenance
+
+Both extractors derive the same `document_id` for a given PDF, and derive it the same
+way on every run, so graph nodes and baseline chunks can be joined and a re-run updates
+a corpus instead of duplicating it.
+
+```python
+from document2graph import document_id_for
+document_id_for("my_document.pdf")  # stable uuid5, independent of directory and extension
+```
+
+Every unit — a graph node, a `Snippet`, a `GraphSnippet` or a baseline `Chunk` — exposes
+its location in the PDF the same way, as a list of `Provenance(page_no, bbox, charspan)`.
+A unit has more than one entry when it spans more than one region: a paragraph stitched
+back together across a column break, a table continued on the next page, or a chunk
+merged from several document items.
 
 ### Baseline chunk extraction
 
@@ -230,8 +341,9 @@ config = ExtractorConfig(
 
 ```
 <data_path>/
-├── raw_texts/          # intermediate Docling extraction output
+├── raw_texts/          # parsed Docling documents (also the parse cache)
 ├── nx_graphs/          # .gexf graph files (one per document)
+├── graphs/             # <filename>_graph.json (full graph, reloadable with load_graph)
 ├── snippets/           # <filename>_snippets.json (document graph output)
 └── baseline_chunks/    # <filename>_baseline_chunks.json
 ```
@@ -240,13 +352,17 @@ config = ExtractorConfig(
 
 | Model | Key fields |
 |---|---|
-| `Snippet` | `snippet_id`, `type` (text/image/table), `document_id`, `sequence_no`, `label`, `level`, `region` (body/front_matter/sidebar/figure), `page_no`, `bbox`, `text` |
-| `Chunk` | `chunk_id`, `document_id`, `text`, `meta`, `baseline_description`, `embedding` |
+| `Snippet` | `snippet_id`, `type` (text/image/table), `document_id`, `sequence_no`, `label`, `level`, `region` (body/front_matter/sidebar/figure), `page_no`, `bbox`, `charspan`, `provenance`, `text` |
+| `Chunk` | `chunk_id`, `document_id`, `filename`, `text`, `meta`, `provenance`, `baseline_description`, `embedding` |
+| `Provenance` | `page_no`, `bbox`, `charspan` |
+| `DocumentGraph` | `document_id`, `filename`, `title`, `root_id`, `snippets: list[GraphSnippet]`, `edges`, `reference_edges` |
+| `GraphSnippet` | everything on `Snippet` plus `local_ref`, `parent_local_ref`, `snippet_type`, `line_heights`, `font_key`, `level_height`, `extracted_at` |
 | `Document` | `document_id`, `document_type`, `filename`, `title`, `metadata: DocumentMetadata` |
 | `DocumentMetadata` | `version`, `authors`, `institutions`, `bibliography`, `correspondence` |
 | `MetadataExtractionConfig` | `title_page`, `version`, `authors`, `institutions`, `bibliography`, `correspondence` (each a `MetadataFieldConfig`) |
 | `MetadataFieldConfig` | `label` (search string), `pages` (inclusive 1-based page range, e.g. `(1, 3)`) |
 | `ChunkerConfig` | `tokenizer` (HF tokenizer name), `max_tokens`, `merge_peers` |
+| `PipelineFlags` | `repair_reading_order`, `stitch_continuations`, `assign_regions`, `recover_captions`, `filter_decorative_pictures`, `level_source` (hybrid/typography/docling) |
 | `EdgeWeightConfig` | `section`, `text`, `list_item`, `media`, `unreferenced_media`, `root` (edge weights by category), `relevancy: RelevancyWeightConfig` |
 | `RelevancyWeightConfig` | `enabled`, `metric` (bm25/embedding/blend), `embedding_model`, `alpha`, `bm25_k1`, `bm25_b`, `bm25_scoring` (child_query/symmetric_mean/symmetric_max), `combination` (mean/multiply) |
 

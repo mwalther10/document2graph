@@ -17,10 +17,12 @@ from ..models.ImageSnippetNode import ImageSnippetNode
 from ..models.TableSnippetNode import TableSnippetNode
 from ..models.DocumentMetadata import MetadataExtractionConfig
 from ..models.EdgeWeightConfig import EdgeWeightConfig
+from ..models.PipelineFlags import PipelineFlags
 from typing import Any, Callable, NamedTuple, TypeVar
 
 from ..utils.edge_weight_lib import apply_relevancy_weights
 from ..utils.log import Log
+from ..utils.provenance import provenance_from_prov
 from .level_classifier import LevelClassifier
 from .metadata_extractor import DocumentMetadataExtractor
 
@@ -91,20 +93,33 @@ class SnippetGraph(NamedTuple):
     root_id: str
 
 class SnippetGraphConstructor():
-    def __init__(self, pdf_doc: PdfDocument, docling_doc: DoclingDocument, filename: str, document_type: str, metadata_config: MetadataExtractionConfig | None = None, edge_weights: EdgeWeightConfig | None = None):
+    def __init__(self, pdf_doc: PdfDocument, docling_doc: DoclingDocument, filename: str, document_type: str, metadata_config: MetadataExtractionConfig | None = None, edge_weights: EdgeWeightConfig | None = None, flags: PipelineFlags | None = None):
         self.pdf_doc = pdf_doc
         self.docling_doc = docling_doc
         self.edge_weights = edge_weights or EdgeWeightConfig()
         self.metadata_config = metadata_config or MetadataExtractionConfig()
+        self.flags = flags or PipelineFlags()
         self.logger = Log("SnippetGraphConstructor").logger
         self._page_shapes_cache: dict[int, tuple[list[float], list[tuple[float, float, float, float]]]] = {}
-        self.text_items = self.assign_regions(self.stitch_continuations(self.order_by_page_blocks(
-            [TextSnippet(text_item=item, line_heights=self.add_line_heights(item), font_key=self.get_font_key(item)) for item in docling_doc.texts if item.label not in ("page_footer", "page_header")]
-        )))
+        self.text_items = self._prepare_text_items(docling_doc)
         self.table_items = docling_doc.tables
-        self.image_items = self.filter_decorative_pictures(docling_doc.pictures)
+        self.image_items = self.filter_decorative_pictures(docling_doc.pictures) if self.flags.filter_decorative_pictures else list(docling_doc.pictures)
         self._document_metadata = DocumentMetadataExtractor(self.text_items).extract(filename, document_type, self.metadata_config)
-        self.levels = LevelClassifier(self.text_items, self._document_metadata.title)
+        self.levels = LevelClassifier(self.text_items, self._document_metadata.title, level_source=self.flags.level_source)
+
+    def _prepare_text_items(self, docling_doc: DoclingDocument) -> list[TextSnippet]:
+        """Read the text snippets off the parsed document and run the repair steps
+        the flags leave enabled, in order: reading order, then stitching (which
+        needs the repaired order), then regions."""
+        snippets = [TextSnippet(text_item=item, line_heights=self.add_line_heights(item), font_key=self.get_font_key(item))
+                    for item in docling_doc.texts if item.label not in ("page_footer", "page_header")]
+        if self.flags.repair_reading_order:
+            snippets = self.order_by_page_blocks(snippets)
+        if self.flags.stitch_continuations:
+            snippets = self.stitch_continuations(snippets)
+        if self.flags.assign_regions:
+            snippets = self.assign_regions(snippets)
+        return snippets
 
     @property
     def document_metadata(self):
@@ -466,6 +481,9 @@ class SnippetGraphConstructor():
                 bbox=snippet.text_item.prov[0].bbox,
                 charspan=snippet.text_item.prov[0].charspan,
                 page_no=snippet.text_item.prov[0].page_no,
+                # stitch_continuations concatenates the provs of the fragments it
+                # merged, so a paragraph broken across columns reports both halves
+                provenance=provenance_from_prov(snippet.text_item.prov),
                 line_heights=snippet.line_heights,
                 font_key=snippet.font_key,
                 level_height=self.levels.level_height(snippet_level),
@@ -542,6 +560,7 @@ class SnippetGraphConstructor():
                 caption_text=" ".join([node.text for node in caption_nodes]) if len(caption_nodes) > 0 else "",
                 bbox=item.prov[0].bbox,
                 page_no=item.prov[0].page_no,
+                provenance=provenance_from_prov(item.prov),
                 **extra_fields(item),
             )
             nodes.append(node)
@@ -565,7 +584,7 @@ class SnippetGraphConstructor():
             for text_node in text_nodes:
                 if caption_ref.get_ref().cref == text_node.docling_self_ref.get_ref().cref:
                     caption_nodes.append(text_node)
-        if not caption_nodes:
+        if not caption_nodes and self.flags.recover_captions:
             # docling often detects the caption but leaves it as a plain text/list
             # item without linking it to the media item: recover it spatially
             recovered = self.recover_caption_node(image, text_nodes)

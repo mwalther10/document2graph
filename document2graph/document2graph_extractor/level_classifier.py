@@ -5,6 +5,7 @@ from collections import defaultdict
 
 from docling_core.types.doc.document import SectionHeaderItem # type: ignore
 
+from ..models.PipelineFlags import LevelSource
 from ..models.TextSnippet import (
     REGION_BODY,
     REGION_FIGURE,
@@ -66,9 +67,11 @@ class LevelClassifier:
 
     Body text and sub-/footnote text are ranked by font height below the header levels."""
 
-    def __init__(self, text_items: list[TextSnippet], title: str | None = None):
+    def __init__(self, text_items: list[TextSnippet], title: str | None = None,
+                 level_source: LevelSource = "hybrid"):
         self.text_items = text_items
         self.title = title
+        self.level_source = level_source
         self.heights = get_heights(text_items)
         self._has_title = False
         # representative height per header level, used only to place headers with no font info
@@ -77,7 +80,10 @@ class LevelClassifier:
         self._level_by_style: dict[Style, int] = {}
         self._outline_top = 0
         self._aside_level = 0
-        self.font_to_clusters, self.section_level_to_label = self._compute_section_header_levels()
+        if level_source == "docling":
+            self.font_to_clusters, self.section_level_to_label = self._compute_docling_header_levels()
+        else:
+            self.font_to_clusters, self.section_level_to_label = self._compute_section_header_levels()
         # body levels continue below the deepest header level -- the outline levels, the
         # title and the level asides are placed on
         num_section_headers = max([*self._header_level_height, self._aside_level,
@@ -109,11 +115,42 @@ class LevelClassifier:
             return self._outline_top
         if snippet.region in (REGION_SIDEBAR, REGION_FIGURE):
             return self._aside_level
+        if self.level_source == "docling":
+            # docling numbers its own section headers from 1; keep them below the title
+            return self._outline_top + max(getattr(snippet.text_item, "level", 1) - 1, 0)
         style = self._style_of(snippet.font_key, self._snippet_height(snippet), self._style_by_height)
         level = self._level_by_style.get(style) if style is not None else None
         # a header with no/unknown font key, or of a style no body header uses: place it
         # by height among the outline levels instead
         return level if level is not None else self._fallback_header_level(snippet)
+
+    def _compute_docling_header_levels(self) -> tuple[dict[str | None, FontClusters], dict[int, str]]:
+        """Take the header hierarchy straight from docling's own SectionHeaderItem.level.
+
+        The ablation baseline for the hybrid ranking: no fonts, no heights, no
+        reading-order evidence -- whatever the layout model decided.
+        """
+        section_headers = [s for s in self.text_items if isinstance(s.text_item, SectionHeaderItem)]
+        has_title = bool(self.title) and any(s.text_item.text == self.title for s in section_headers)
+        self._has_title = has_title
+        self._outline_top = 1 if has_title else 0
+
+        level_to_label: dict[int, str] = {0: "Title"} if has_title else {}
+        heights_per_level: dict[int, list[float]] = defaultdict(list)
+        for snippet in section_headers:
+            if has_title and snippet.text_item.text == self.title:
+                continue
+            level = self._outline_top + max(getattr(snippet.text_item, "level", 1) - 1, 0)
+            level_to_label[level] = "Heading"
+            height = self._snippet_height(snippet)
+            if height:
+                heights_per_level[level].append(height)
+
+        header_levels = [lvl for lvl in level_to_label if lvl >= self._outline_top]
+        self._aside_level = max(header_levels, default=self._outline_top - 1) + 1
+        level_to_label[self._aside_level] = "Heading"
+        self._header_level_height = {lvl: float(np.median(reps)) for lvl, reps in heights_per_level.items()}
+        return {}, level_to_label
 
     def _compute_section_header_levels(self) -> tuple[dict[str | None, FontClusters], dict[int, str]]:
         section_headers = [s for s in self.text_items if isinstance(s.text_item, SectionHeaderItem)]
@@ -226,6 +263,14 @@ class LevelClassifier:
         for i, a in enumerate(styles):
             for b in styles[i + 1:]:
                 tall, short = (a, b) if a[1] >= b[1] else (b, a)
+                if self.level_source == "typography":
+                    # size alone: the taller style is always the parent, and styles of
+                    # the same apparent size stay siblings. No nesting evidence, so no
+                    # inversion either -- the ablation baseline for the hybrid ranking.
+                    if not self._is_size_step(tall[1], short[1]):
+                        continue
+                    graph.add_edge(tall, short, confidence=(False, tall[1] - short[1]))
+                    continue
                 if self._is_size_step(tall[1], short[1]):
                     # a real size step: the taller style is the parent unless the smaller
                     # one demonstrably wraps it (small-caps section headings above larger

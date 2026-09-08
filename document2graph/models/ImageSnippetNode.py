@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from docling_core.types.doc.document import RefItem
 from docling_core.types.doc.base import BoundingBox
+from .Provenance import Provenance
 from .TextSnippetNode import TextSnippetNode
 
 
@@ -20,3 +21,6 @@ class ImageSnippetNode(BaseModel):
     referencing_node_ids: list[str] = []  # snippet_ids of all text nodes that mention this media item
     bbox: BoundingBox
     page_no: int
+    # every location this node occupies in the PDF; bbox/page_no above are the first
+    # of them. A table continued on the next page has several.
+    provenance: list[Provenance] = []

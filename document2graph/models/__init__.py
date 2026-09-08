@@ -2,6 +2,8 @@ from .Chunk import Chunk
 from .ChunkerConfig import ChunkerConfig
 from .EdgeWeightConfig import EdgeWeightConfig, RelevancyWeightConfig
 from .ExtractorConfig import ExtractorConfig
+from .PipelineFlags import LevelSource, PipelineFlags
+from .Provenance import Provenance
 from .Snippet import Snippet
 from .Document import Document
 from .DocumentMetadata import DocumentMetadata, MetadataExtractionConfig, MetadataFieldConfig
@@ -16,6 +18,9 @@ __all__ = [
     "EdgeWeightConfig",
     "RelevancyWeightConfig",
     "ExtractorConfig",
+    "LevelSource",
+    "PipelineFlags",
+    "Provenance",
     "Snippet",
     "Document",
     "DocumentMetadata",

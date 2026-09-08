@@ -16,6 +16,7 @@ from document2graph.models import (
     EdgeWeightConfig,
     ImageSnippetNode,
     MetadataExtractionConfig,
+    PipelineFlags,
     TextSnippet,
     TextSnippetNode,
 )
@@ -382,3 +383,62 @@ def test_graph_is_connected(constructor: SnippetGraphConstructor):
     # the cycle is attached via its structurally highest node
     assert graph.has_edge(ROOT_NODE_ID, cycle_a.snippet_id)
     assert all("weight" in data for _, _, data in graph.edges(data=True))
+
+
+def flagged_constructor(paged: SnippetGraphConstructor, **flags) -> SnippetGraphConstructor:
+    """The paged constructor with the ablation flags set and the per-snippet
+    typography lookups stubbed out (they need a real parsed page)."""
+    paged.flags = PipelineFlags(**flags)
+    paged.add_line_heights = lambda item: [10.0]
+    paged.get_font_key = lambda item: "F1"
+    return paged
+
+
+def make_docling_doc(*snippets: TextSnippet) -> SimpleNamespace:
+    return SimpleNamespace(texts=[s.text_item for s in snippets], tables=[], pictures=[])
+
+
+def test_stitching_flag_off_leaves_the_column_fragments_apart(paged_constructor: SnippetGraphConstructor):
+    head = make_snippet(0, top=340.0, left=50.0, text="können in der ambulanten und")
+    tail = make_snippet(1, top=690.0, left=320.0, text="stationären Pflege eingesetzt werden.")
+    doc = make_docling_doc(head, tail)
+
+    on = flagged_constructor(paged_constructor, stitch_continuations=True)._prepare_text_items(doc)
+    assert len(on) == 1
+
+    off = flagged_constructor(paged_constructor, stitch_continuations=False)._prepare_text_items(doc)
+    assert len(off) == 2
+    assert [s.text_item.text for s in off] == [head.text_item.text, tail.text_item.text]
+
+
+def test_reading_order_flag_off_keeps_doclings_order(paged_constructor: SnippetGraphConstructor):
+    """docling reads the page column by column, so the left column's body text arrives
+    before the right column's continuation of the block above it. The repair puts the
+    blocks back in order; turning it off leaves docling's order alone."""
+    left_body = make_snippet(0, top=250.0, left=50.0, text="Linke Spalte, unterer Block.")
+    right_front = make_snippet(1, top=600.0, left=320.0, text="Rechte Spalte, oberer Block.")
+    doc = make_docling_doc(left_body, right_front)
+
+    on = flagged_constructor(paged_constructor, repair_reading_order=True, stitch_continuations=False,
+                             assign_regions=False)._prepare_text_items(doc)
+    assert [s.text_item.self_ref for s in on] == ["#/texts/1", "#/texts/0"]
+
+    off = flagged_constructor(paged_constructor, repair_reading_order=False, stitch_continuations=False,
+                              assign_regions=False)._prepare_text_items(doc)
+    assert [s.text_item.self_ref for s in off] == ["#/texts/0", "#/texts/1"]
+
+
+def test_region_flag_off_leaves_everything_in_the_body(paged_constructor: SnippetGraphConstructor):
+    """With regions off the masthead and a boxed sidebar are ordinary body text, so
+    they take part in the document outline."""
+    masthead = make_snippet(0, top=650.0, left=50.0, text="Deutsche Gesellschaft")
+    boxed = make_snippet(1, top=250.0, left=320.0, text="EMPFEHLUNGEN")
+    doc = make_docling_doc(masthead, boxed)
+
+    on = flagged_constructor(paged_constructor, assign_regions=True,
+                             stitch_continuations=False)._prepare_text_items(doc)
+    assert {s.region for s in on} == {"front_matter", "sidebar"}
+
+    off = flagged_constructor(paged_constructor, assign_regions=False,
+                              stitch_continuations=False)._prepare_text_items(doc)
+    assert {s.region for s in off} == {"body"}

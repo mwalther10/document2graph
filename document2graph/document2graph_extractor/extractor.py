@@ -8,6 +8,7 @@ from docling_parse.pdf_parser import DoclingPdfParser, PdfDocument
 from ..models.Snippet import Snippet
 from ..models.ExtractorConfig import ExtractorConfig
 from typing import Any, List
+from ..graph_store import DocumentGraph, save_graph
 from ..utils.log import Log
 
 
@@ -26,6 +27,9 @@ class DocumentGraphExtractor:
         self.document_type = config.document_type
         self.metadata_config = config.metadata_config
         self.edge_weights = config.edge_weights
+        self.flags = config.flags
+        self.use_docling_cache = config.use_docling_cache
+        self.refresh_docling_cache = config.refresh_docling_cache
 
     def _run(self, filename: str) -> dict[str, Any]:
         sample = os.path.join(self.pdf_path, filename)
@@ -36,7 +40,10 @@ class DocumentGraphExtractor:
         os.makedirs(graph_save_dir, exist_ok=True)
 
         extractor = Extractor(
-            source=sample, pipeline_options=self.pdfPipelineOptions
+            source=sample,
+            pipeline_options=self.pdfPipelineOptions,
+            cache_dir=raw_text_save_dir if self.use_docling_cache else None,
+            refresh=self.refresh_docling_cache,
         )
         extractor.extract(save_dir=raw_text_save_dir, filename=clean_filename)
         parser = DoclingPdfParser()
@@ -44,16 +51,22 @@ class DocumentGraphExtractor:
 
         snippet_to_graph = SnippetGraphConstructor(
             pdf_doc,
-            extractor.docling_doc.document,
+            extractor.doc,
             clean_filename,
             document_type=self.document_type,
             metadata_config=self.metadata_config,
             edge_weights=self.edge_weights,
+            flags=self.flags,
         )
         graph = snippet_to_graph.get_graph(
             save_to=f"{graph_save_dir}/{clean_filename}.gexf"
         )
         doc_metadata = snippet_to_graph.document_metadata
+        document_graph = DocumentGraph.from_snippet_graph(graph, doc_metadata)
+        if self.save_json:
+            # GEXF drops bbox, page_no, charspan and the table serializations; the
+            # json is the form that can be loaded back without re-running docling
+            save_graph(document_graph, os.path.join(self.data_path, "graphs", f"{clean_filename}_graph.json"))
 
         return {
             "text_nodes": graph.text_nodes,
@@ -63,6 +76,7 @@ class DocumentGraphExtractor:
             "reference_edges": graph.reference_edges,
             "root_id": graph.root_id,
             "document_metadata": doc_metadata,
+            "document_graph": document_graph,
             "clean_filename": clean_filename
         }
 
@@ -75,7 +89,11 @@ class DocumentGraphExtractor:
         not part of the tree),
         root_id (snippet_id of the document root: the title node, or the
         synthetic root if no title node was found),
-        document_metadata, clean_filename.
+        document_metadata (a Document),
+        document_graph (the same graph as a DocumentGraph: one flat snippet
+        list with globally unique ids, saved to <data_path>/graphs/ and
+        reloadable with graph_store.load_graph),
+        clean_filename.
         """
         return self._run(filename)
 
@@ -113,6 +131,8 @@ class DocumentGraphExtractor:
             region=getattr(node, "region", "body"),
             page_no=node.page_no,
             bbox=node.bbox,
+            charspan=getattr(node, "charspan", None),
+            provenance=node.provenance,
             text=text_value,
             docling_parent_ref=node.docling_parent_ref,
             docling_self_ref=node.docling_self_ref

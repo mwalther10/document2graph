@@ -22,9 +22,9 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
-    "docling",
-    "docling-core",
-    "docling-parse",
+    "docling>=2.113",
+    "docling-core>=2.87",
+    "docling-parse>=7.8",
     "numpy",
     "pydantic>=2",
     "regex",
@@ -39,8 +39,9 @@ Homepage = "https://github.com/mwalther10/document2graph"
 Issues = "https://github.com/mwalther10/document2graph/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest", "python-dotenv", "neo4j"]
 embeddings = ["sentence-transformers"]
+neo4j = ["neo4j"]
 
 [tool.setuptools.packages.find]
 where = ["."]
