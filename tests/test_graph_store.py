@@ -11,6 +11,7 @@ from document2graph.models import (
     Document,
     DocumentMetadata,
     ImageSnippetNode,
+    PageGeometry,
     Provenance,
     TextSnippetNode,
 )
@@ -84,6 +85,8 @@ def snippet_graph() -> SnippetGraph:
         edges=[("#/texts/0", "#/texts/1", 0.8), ("#/texts/0", "#/pictures/0", 0.9)],
         reference_edges=[("#/texts/1", "#/pictures/0", 0.7)],
         root_id="#/texts/0",
+        pages=[PageGeometry(page_no=1, width=595.0, height=842.0),
+               PageGeometry(page_no=2, width=595.0, height=842.0)],
     )
 
 
@@ -165,3 +168,62 @@ def test_save_and_load_graph_round_trip(tmp_path, snippet_graph: SnippetGraph):
     reloaded = load_graph(path)
     assert reloaded == graph
     assert reloaded.model_dump() == graph.model_dump()
+
+
+def test_page_geometry_survives_the_json_round_trip(snippet_graph: SnippetGraph, tmp_path):
+    """A box is only placeable on a page if the page travels with it.
+
+    The whole reason the page table is on the graph rather than recovered from
+    the PDF: a consumer reading a saved graph normalizes bboxes against these.
+    """
+    graph = DocumentGraph.from_snippet_graph(snippet_graph, make_document())
+    reloaded = load_graph(save_graph(graph, str(tmp_path / "graph.json")))
+
+    assert [(p.page_no, p.width, p.height) for p in reloaded.pages] == [
+        (1, 595.0, 842.0),
+        (2, 595.0, 842.0),
+    ]
+    assert reloaded.page(2) is not None and reloaded.page(2).height == 842.0
+
+
+def test_every_snippet_box_lands_on_a_recorded_page(snippet_graph: SnippetGraph):
+    graph = DocumentGraph.from_snippet_graph(snippet_graph, make_document())
+    boxed = [s for s in graph.snippets if s.bbox is not None]
+    assert boxed, "fixture should carry boxes, otherwise this asserts nothing"
+    assert all(graph.page(s.page_no) is not None for s in boxed)
+
+
+def test_page_lookup_returns_none_rather_than_raising_on_a_graph_without_pages():
+    """Schema 1 graphs have no page table, and that has to be distinguishable
+    from a page number that does not exist -- both return None, but neither is
+    an error a consumer should have to catch."""
+    graph = DocumentGraph.from_snippet_graph(
+        SnippetGraph(text_nodes=[make_text_node(0, level=0, parent_id=None)],
+                     image_nodes=[], table_nodes=[], edges=[], reference_edges=[],
+                     root_id="#/texts/0"),
+        make_document(),
+    )
+    assert graph.pages == []
+    assert graph.page(1) is None
+
+
+def test_edge_relations_survive_the_round_trip(snippet_graph: SnippetGraph, tmp_path):
+    """Three relations -- reference, unreferenced_media and root -- describe how an
+    edge was created rather than what its two nodes are, so nothing downstream can
+    recover them from the graph. They have to be stored."""
+    graph = DocumentGraph.from_snippet_graph(
+        snippet_graph._replace(relations={
+            ("#/texts/0", "#/texts/1"): "text",
+            ("#/texts/0", "#/pictures/0"): "unreferenced_media",
+            ("#/texts/1", "#/pictures/0"): "reference",
+        }),
+        make_document(),
+    )
+    reloaded = load_graph(save_graph(graph, str(tmp_path / "graph.json")))
+
+    text_id = global_id(DOC_ID, "#/texts/1")
+    image_id = global_id(DOC_ID, "#/pictures/0")
+    assert reloaded.relation(global_id(DOC_ID, "#/texts/0"), text_id) == "text"
+    assert reloaded.relation(global_id(DOC_ID, "#/texts/0"), image_id) == "unreferenced_media"
+    assert reloaded.relation(text_id, image_id) == "reference"
+    assert reloaded.relation(text_id, "nonexistent") is None

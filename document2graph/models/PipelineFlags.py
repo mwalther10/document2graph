@@ -19,6 +19,12 @@ class PipelineFlags(BaseModel):
     repair_reading_order: bool = True
     # merge a paragraph split across a column or page break back into one snippet
     stitch_continuations: bool = True
+    # merge the line-by-line fragments docling emits for a figure, a boxed sidebar
+    # or the masthead back into one snippet per text block. Needs assign_regions:
+    # running text is never merged this way, only the regions that are set line by line
+    merge_line_fragments: bool = True
+    # merge a table continued on the next page back into one table item
+    merge_table_continuations: bool = True
     # label snippets body / front_matter / sidebar / figure; off means all body,
     # so the masthead and boxed sidebars take part in the document outline
     assign_regions: bool = True

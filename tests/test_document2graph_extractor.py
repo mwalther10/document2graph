@@ -5,7 +5,12 @@ import pytest
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from document2graph.document2graph_extractor import DocumentGraphExtractor
-from document2graph.graph_store import ensure_neo4j_constraints, load_graph, write_graph_to_neo4j
+from document2graph.graph_store import (
+    SCHEMA_VERSION,
+    ensure_neo4j_constraints,
+    load_graph,
+    write_graph_to_neo4j,
+)
 from document2graph.models import ExtractorConfig, MetadataFieldConfig, MetadataExtractionConfig
 from document2graph.utils.ids import document_id_for
 
@@ -143,3 +148,44 @@ def test_document2graph_is_connected_and_weighted(config: ExtractorConfig):
 
 if __name__ == "__main__":
     pytest.main(["-v", "tests/test_document2graph_extractor.py"])
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not os.path.isdir(PDF_DIR), reason="test PDFs not available")
+def test_graph_from_docling_builds_from_a_cached_parse(config: ExtractorConfig):
+    """The entry point a harness uses: a graph from already-parsed input, no corpus
+    directory and nothing written. An ablation over flags reuses one parse through
+    this, so it has to work without re-running the layout model."""
+    from docling_core.types.doc.document import DoclingDocument
+    from docling_parse.pdf_parser import DoclingPdfParser
+
+    from document2graph import PipelineFlags, graph_from_docling
+
+    pdf = next(f for f in sorted(os.listdir(config.pdf_path)) if f.endswith(".pdf"))
+    name = os.path.splitext(pdf)[0]
+    cached = os.path.join(config.data_path, "raw_texts", f"{name}_docling_doc.json")
+    if not os.path.isfile(cached):
+        pytest.skip("docling cache not populated; run the extractor test first")
+
+    docling_doc = DoclingDocument.load_from_json(cached)
+    pdf_doc = DoclingPdfParser().load(path_or_stream=os.path.join(config.pdf_path, pdf))
+
+    graph = graph_from_docling(docling_doc, pdf_doc, name,
+                               document_type=config.document_type,
+                               metadata_config=config.metadata_config)
+
+    assert graph.schema_version == SCHEMA_VERSION
+    assert graph.snippets and graph.edges
+    # the two things a reloaded graph cannot reconstruct for itself
+    assert graph.pages, "page geometry must travel with the graph"
+    assert graph.edge_relations, "edge relations must travel with the graph"
+    # every box is placeable on a page it declares
+    boxed = [s for s in graph.snippets if s.bbox is not None]
+    assert boxed and all(graph.page(s.page_no) is not None for s in boxed)
+
+    # and a post-parse flag really does change the result, off the same parse
+    ablated = graph_from_docling(docling_doc, pdf_doc, name,
+                                 document_type=config.document_type,
+                                 metadata_config=config.metadata_config,
+                                 flags=PipelineFlags(stitch_continuations=False))
+    assert len(ablated.snippets) != len(graph.snippets)

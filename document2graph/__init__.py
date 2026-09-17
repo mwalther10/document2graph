@@ -13,7 +13,11 @@ chunks can be aligned back to the page they came from.
 """
 
 from .baseline_extractor import BaselineExtractor
-from .document2graph_extractor import DocumentGraphExtractor
+from .document2graph_extractor import (
+    DocumentGraphExtractor,
+    build_snippet_graph,
+    graph_from_docling,
+)
 from .graph_store import (
     DocumentGraph,
     GraphSnippet,
@@ -30,17 +34,29 @@ from .models import (
     DocumentMetadata,
     EdgeWeightConfig,
     ExtractorConfig,
+    ExpansionPolicy,
+    MergedEdge,
+    MergedUnit,
+    MergePolicy,
     MetadataExtractionConfig,
     MetadataFieldConfig,
+    PageGeometry,
     PipelineFlags,
     Provenance,
-    RelevancyWeightConfig,
     Snippet,
+)
+from .retrieval import (
+    Calibration,
+    expand,
+    calibrate_min_weight,
+    mean_unit_tokens,
+    merge_units,
 )
 from .utils.ids import document_id_for
 
 __all__ = [
     "BaselineExtractor",
+    "Calibration",
     "DocumentGraphExtractor",
     "Chunk",
     "ChunkerConfig",
@@ -48,18 +64,28 @@ __all__ = [
     "DocumentGraph",
     "DocumentMetadata",
     "EdgeWeightConfig",
+    "ExpansionPolicy",
     "ExtractorConfig",
     "GraphSnippet",
+    "MergePolicy",
+    "MergedEdge",
+    "MergedUnit",
     "MetadataExtractionConfig",
     "MetadataFieldConfig",
+    "PageGeometry",
     "PipelineFlags",
     "Provenance",
-    "RelevancyWeightConfig",
     "Snippet",
+    "build_snippet_graph",
+    "calibrate_min_weight",
     "document_id_for",
+    "expand",
+    "graph_from_docling",
     "ensure_neo4j_constraints",
     "global_id",
     "load_graph",
+    "mean_unit_tokens",
+    "merge_units",
     "save_graph",
     "write_graph_to_neo4j",
 ]

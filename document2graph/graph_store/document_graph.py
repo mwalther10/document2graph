@@ -19,15 +19,33 @@ from docling_core.types.doc.base import BoundingBox
 from pydantic import BaseModel
 
 from ..models.Document import Document
+from ..models.PageGeometry import PageGeometry
 from ..models.Provenance import Provenance
 
 if TYPE_CHECKING:  # avoid a circular import: the extractor imports the store
     from ..document2graph_extractor.snippet_graph_constructor import SnippetGraph
 
-SCHEMA_VERSION = 1
+# 2: added DocumentGraph.pages. A graph written under version 1 still loads --
+# pages defaults to empty -- but nothing can place its boxes on a page, so a
+# consumer that needs geometry should re-extract rather than read the default as
+# "this document has no pages".
+# 3: added DocumentGraph.edge_relations, without which a reloaded graph cannot
+# reproduce its own weights: three relations are facts about how an edge was
+# created and are not recoverable from the two nodes it joins.
+SCHEMA_VERSION = 3
 
 # snippet_type of the synthetic root node materialized for documents with no title node
 ROOT_SNIPPET_TYPE = "root"
+
+# Separator for the (parent, child) key of DocumentGraph.edge_relations. A JSON
+# object cannot key on a pair, and snippet ids are hex digests, so no id can
+# contain this.
+EDGE_KEY_SEPARATOR = ">"
+
+
+def edge_key(parent_id: str, child_id: str) -> str:
+    """The ``edge_relations`` key of one edge."""
+    return f"{parent_id}{EDGE_KEY_SEPARATOR}{child_id}"
 
 
 def global_id(document_id: str, local_ref: str) -> str:
@@ -88,6 +106,35 @@ class DocumentGraph(BaseModel):
     snippets: list[GraphSnippet]
     edges: list[tuple[str, str, float]]  # hierarchy tree: (parent snippet_id, child snippet_id, weight)
     reference_edges: list[tuple[str, str, float]] = []  # mentions: (text snippet_id, media snippet_id, weight)
+    # the box of every page, so a reloaded graph can place its own bounding boxes
+    # without the PDF; empty on graphs written before schema version 2
+    pages: list[PageGeometry] = []
+    # structural relation of every edge and reference edge, keyed by edge_key().
+    # Empty on graphs written before schema version 3.
+    #
+    # Stored rather than derived because three of the relations -- reference,
+    # unreferenced_media and root -- describe how graph construction created the
+    # edge, not what the two nodes are, so nothing downstream can recover them.
+    # Losing them is not a small loss: unreferenced_media carries the *highest*
+    # measured supply prior (1.00) and would otherwise be read as an ordinary
+    # media edge (0.50).
+    edge_relations: dict[str, str] = {}
+
+    def relation(self, parent_id: str, child_id: str) -> str | None:
+        """The structural relation of one edge, or None if it was not recorded."""
+        return self.edge_relations.get(edge_key(parent_id, child_id))
+
+    def page(self, page_no: int) -> PageGeometry | None:
+        """The box of one page, or None when the page table was not recorded.
+
+        Returning None rather than raising: a graph written under schema version
+        1 has no page table at all, and a consumer should be able to tell that
+        apart from a page number that does not exist.
+        """
+        for page in self.pages:
+            if page.page_no == page_no:
+                return page
+        return None
 
     @classmethod
     def from_snippet_graph(cls, graph: "SnippetGraph", document: Document) -> "DocumentGraph":
@@ -166,4 +213,9 @@ class DocumentGraph(BaseModel):
                 (global_id(document_id, source), global_id(document_id, target), float(weight))
                 for source, target, weight in graph.reference_edges
             ],
+            pages=list(graph.pages),
+            edge_relations={
+                edge_key(global_id(document_id, parent), global_id(document_id, child)): relation
+                for (parent, child), relation in graph.relations.items()
+            },
         )

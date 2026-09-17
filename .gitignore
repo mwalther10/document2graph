@@ -12,3 +12,5 @@ tests/.test-data/**/*
 tests/.test-pdf/*
 tests/.test-pdf/**/*
 tests/.test-pdf/PE_Definition_des_Diabetes_mellitus_Update_2025.pdf
+paper/
+

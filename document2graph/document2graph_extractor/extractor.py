@@ -1,6 +1,6 @@
 import os
 
-from .snippet_graph_constructor import SnippetGraphConstructor
+from .build import build_snippet_graph
 from ..utils.base_extractor import Extractor
 from tqdm import tqdm
 import json
@@ -49,19 +49,16 @@ class DocumentGraphExtractor:
         parser = DoclingPdfParser()
         pdf_doc: PdfDocument = parser.load(path_or_stream=sample)
 
-        snippet_to_graph = SnippetGraphConstructor(
-            pdf_doc,
+        graph, doc_metadata = build_snippet_graph(
             extractor.doc,
+            pdf_doc,
             clean_filename,
             document_type=self.document_type,
             metadata_config=self.metadata_config,
             edge_weights=self.edge_weights,
             flags=self.flags,
+            save_gexf_to=f"{graph_save_dir}/{clean_filename}.gexf",
         )
-        graph = snippet_to_graph.get_graph(
-            save_to=f"{graph_save_dir}/{clean_filename}.gexf"
-        )
-        doc_metadata = snippet_to_graph.document_metadata
         document_graph = DocumentGraph.from_snippet_graph(graph, doc_metadata)
         if self.save_json:
             # GEXF drops bbox, page_no, charspan and the table serializations; the

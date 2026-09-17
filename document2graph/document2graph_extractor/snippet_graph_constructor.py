@@ -1,10 +1,11 @@
 from docling_core.types.doc.document import TextItem, PictureItem, TableItem, DoclingDocument # type: ignore
 from docling_parse.pdf_parser import PdfDocument
-from docling_core.types.doc.base import CoordOrigin
+from docling_core.types.doc.base import BoundingBox, CoordOrigin
 from docling_core.types.doc.page import TextCellUnit
+import copy
 import regex as re
 import networkx as nx
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from ..models.TextSnippet import (
     REGION_BODY,
     REGION_FIGURE,
@@ -17,10 +18,25 @@ from ..models.ImageSnippetNode import ImageSnippetNode
 from ..models.TableSnippetNode import TableSnippetNode
 from ..models.DocumentMetadata import MetadataExtractionConfig
 from ..models.EdgeWeightConfig import EdgeWeightConfig
+from ..models.PageGeometry import PageGeometry
 from ..models.PipelineFlags import PipelineFlags
 from typing import Any, Callable, NamedTuple, TypeVar
 
-from ..utils.edge_weight_lib import apply_relevancy_weights
+from ..edge_weights import (
+    RELATION_LIST_ITEM,
+    RELATION_MEDIA,
+    RELATION_REFERENCE,
+    RELATION_ROOT,
+    RELATION_SECTION,
+    RELATION_TEXT,
+    RELATION_UNREFERENCED_MEDIA,
+    Edge,
+    EdgeContext,
+    Unit,
+    WeightedEdge,
+    apply_edge_weights,
+)
+from ..edge_weights.context import KIND_IMAGE, KIND_ROOT, KIND_TABLE, KIND_TEXT
 from ..utils.log import Log
 from ..utils.provenance import provenance_from_prov
 from .level_classifier import LevelClassifier
@@ -58,6 +74,11 @@ RULE_MAX_HEIGHT = 3.0
 # as section headers, but they are asides, not sections of the document.
 BOX_MIN_WIDTH = 40.0
 BOX_MIN_HEIGHT = 20.0
+# A rectangle covering this much of the page in both directions is its background, not
+# a sidebar: word processors lay one under every page. Counting it as a box puts the
+# whole page inside a sidebar, which leaves the document without body text and so
+# without an outline to rank its headings into.
+BOX_MAX_PAGE_COVERAGE = 0.95
 # tolerance when testing whether a snippet sits inside a box (pt)
 BOX_PADDING = 2.0
 
@@ -72,9 +93,53 @@ CONTINUATION_BREAKS = ",-­"
 # a hyphen before one of these words is suspended ("Akut- und Folgekomplikationen"),
 # not a word broken across the break
 SUSPENDED_HYPHEN_FOLLOWERS = ("und", "oder", "bzw", "sowie", "beziehungsweise", "and", "or")
+# Things that legitimately open a column without continuing the previous one, and so
+# must never be stitched onto it: a numbered affiliation or reference ("14 Deutsches
+# Zentrum ..."), and a bibliography entry, which opens on a surname and initials
+# ("Pani LN, Korenda L, Meigs JB et al."). Captions are caught by CAPTION_PATTERN.
+NUMBERED_ENTRY = re.compile(r"^\d+[\s.)]")
+BIBLIOGRAPHY_ENTRY = re.compile(r"^[A-ZÄÖÜ][a-zäöüß]+(?:-[A-ZÄÖÜ][a-zäöüß]+)?\s+[A-Z]{1,3}[,.]")
+# An address closes on its e-mail, whatever punctuation follows it. Without this a
+# correspondence entry counts as unfinished -- it ends on a lower case word -- and runs
+# into the next author of the masthead.
+TRAILING_EMAIL = re.compile(r"[^\s@]+@[^\s@]+\.[A-Za-z]{2,}[.,;:]?$")
+
+# Line-fragment merging. Docling reads a figure's body, a boxed sidebar and the
+# masthead line by line instead of block by block, so one bullet of a flowchart
+# becomes five snippets. Running text is not affected -- there docling's own
+# clustering holds and stitch_continuations covers the column breaks -- so the
+# merge is restricted to the regions that are set line by line.
+# Calibrated against a hand-labelled review of 298 candidate splits across the
+# corpus: within a region, two fragments at most MAX_LINE_FRAGMENT_GAP apart
+# were one block in 97% of cases, and none more than 10pt apart ever were.
+LINE_FRAGMENT_REGIONS = (REGION_FIGURE, REGION_SIDEBAR, REGION_FRONT_MATTER)
+MAX_LINE_FRAGMENT_GAP = 4.0
+# tall display type in a figure sets its lines further apart than body text
+LINE_FRAGMENT_GAP_RATIO = 0.35
+# fraction of the narrower fragment the two must share horizontally to be read as
+# one column; keeps the two halves of a side-by-side figure apart
+MIN_LINE_FRAGMENT_OVERLAP = 0.3
+
+# Table continuation. A table continued on the next page is two TableItems, and
+# nothing downstream rejoins them. The same review found continuations only ever
+# across a *page* break: every candidate pair that met across a column break was
+# two separate tables (the recommendation boxes of the guideline layout, which
+# repeat their header row and so cannot be told apart by it).
+TABLE_CONTINUATION_MIN_STUB_OVERLAP = 0.6
+# one shared row label is the repeated "Empfehlungen" of two sibling boxes; a real
+# continuation repeats its whole stub
+TABLE_CONTINUATION_MIN_SHARED_LABELS = 2
+TABLE_CONTINUATION_MAX_WIDTH_DELTA = 5.0
+# a continuation ends its page low and resumes high on the next
+TABLE_CONTINUATION_MAX_BOTTOM = 0.35
+TABLE_CONTINUATION_MIN_TOP = 0.6
+
+# How many (page, cell unit, origin) cell lists to keep. Snippets arrive in page
+# order, so a handful is enough to hit on nearly every lookup, while holding the
+# character cells of a whole 200-page report at once would not be.
+PAGE_CELL_CACHE_PAGES = 8
 
 SnippetNode = TextSnippetNode | ImageSnippetNode | TableSnippetNode
-WeightedEdge = tuple[str, str, float]
 
 class SnippetGraph(NamedTuple):
     """Result of get_graph: all snippet nodes, weighted edges, and the id of the root node.
@@ -84,6 +149,18 @@ class SnippetGraph(NamedTuple):
 
     root_id is the snippet_id of the document title node, or the synthetic
     ROOT_NODE_ID (which is not part of the node lists) if no title node was found.
+
+    pages carries the size of every page of the source document, so that the
+    boxes on the nodes can be placed on a page by a consumer that no longer has
+    the PDF.
+
+    relations is the structural relation of every edge, keyed by (parent, child).
+    Three of them -- reference, unreferenced_media and root -- are facts about how
+    the edge was created rather than about the two nodes, so they cannot be
+    recovered from the nodes afterwards and have to travel with the graph.
+
+    Both are last and default to empty because the tuple is built positionally in
+    places that predate them.
     """
     text_nodes: list[TextSnippetNode]
     image_nodes: list[ImageSnippetNode]
@@ -91,18 +168,26 @@ class SnippetGraph(NamedTuple):
     edges: list[WeightedEdge]
     reference_edges: list[WeightedEdge]
     root_id: str
+    pages: list[PageGeometry] = []
+    relations: dict[Edge, str] = {}
 
 class SnippetGraphConstructor():
     def __init__(self, pdf_doc: PdfDocument, docling_doc: DoclingDocument, filename: str, document_type: str, metadata_config: MetadataExtractionConfig | None = None, edge_weights: EdgeWeightConfig | None = None, flags: PipelineFlags | None = None):
         self.pdf_doc = pdf_doc
         self.docling_doc = docling_doc
         self.edge_weights = edge_weights or EdgeWeightConfig()
+        self._edge_relations: dict[Edge, str] = {}
         self.metadata_config = metadata_config or MetadataExtractionConfig()
         self.flags = flags or PipelineFlags()
         self.logger = Log("SnippetGraphConstructor").logger
         self._page_shapes_cache: dict[int, tuple[list[float], list[tuple[float, float, float, float]]]] = {}
+        self._page_cells_cache: OrderedDict = OrderedDict()
         self.text_items = self._prepare_text_items(docling_doc)
-        self.table_items = docling_doc.tables
+        # head table ref -> refs of the continuations folded into it; merge_table_continuations
+        # fills it, so it has to exist even when the step is off
+        self._table_continuations: dict[str, list[str]] = {}
+        self.table_items = (self.merge_table_continuations(docling_doc.tables)
+                            if self.flags.merge_table_continuations else list(docling_doc.tables))
         self.image_items = self.filter_decorative_pictures(docling_doc.pictures) if self.flags.filter_decorative_pictures else list(docling_doc.pictures)
         self._document_metadata = DocumentMetadataExtractor(self.text_items).extract(filename, document_type, self.metadata_config)
         self.levels = LevelClassifier(self.text_items, self._document_metadata.title, level_source=self.flags.level_source)
@@ -119,15 +204,86 @@ class SnippetGraphConstructor():
             snippets = self.stitch_continuations(snippets)
         if self.flags.assign_regions:
             snippets = self.assign_regions(snippets)
+            if self.flags.merge_line_fragments:
+                # last, because it reads the region the previous step assigned
+                snippets = self.merge_line_fragments(snippets)
         return snippets
 
     @property
     def document_metadata(self):
         return self._document_metadata
 
+    def page_geometry(self) -> list[PageGeometry]:
+        """The box of every page of the document, in page order.
+
+        Read off the parsed docling document rather than off ``pdf_doc``: the
+        boxes stored on the nodes are docling provenance boxes, so docling's own
+        page sizes are the space they are already expressed in. The two agree
+        anyway -- both report the PDF's points -- but only one of them survives
+        in the cached parse.
+        """
+        return [
+            PageGeometry(page_no=page_no, width=page.size.width, height=page.size.height)
+            for page_no, page in sorted(self.docling_doc.pages.items())
+        ]
+
+    def _page_cells(self, page_no: int, cell_unit: TextCellUnit, origin: CoordOrigin):
+        """Every cell of one page, converted to ``origin`` once, with its bounding box.
+
+        ``SegmentedPdfPage.get_cells_in_bbox`` deep-copies *every* cell on the
+        page before testing a single one for overlap, so asking it for the cells
+        of one snippet costs a copy of the whole page. Graph construction asks
+        once per snippet, twice over (line heights and font keys), which makes
+        the total (snippets x cells per page) copies of a pydantic model: 90 of
+        the 95 seconds a 12-page guideline took to build, almost all of it under
+        get_font_key, whose character cells are the numerous kind.
+
+        The cells of a page do not change between those calls, so they are read
+        and converted once here and the overlap test is done against the cached
+        boxes. Only a few pages are held at a time: snippets arrive in page
+        order, so a small cache hits nearly always, and the character cells of a
+        200-page report would not be worth keeping all at once.
+        """
+        key = (page_no, cell_unit, origin)
+        cached = self._page_cells_cache.get(key)
+        if cached is not None:
+            self._page_cells_cache.move_to_end(key)
+            return cached
+
+        page = self.pdf_doc.get_page(page_no)
+        entries = []
+        for cell in page.iterate_cells(cell_unit):
+            # copy only when the rect has to be rewritten, and never per query
+            if cell.rect.coord_origin != origin:
+                cell = copy.deepcopy(cell)
+                cell.rect = (cell.rect.to_top_left_origin(page.dimension.height)
+                             if origin == CoordOrigin.TOPLEFT
+                             else cell.rect.to_bottom_left_origin(page.dimension.height))
+            entries.append((cell, cell.to_bounding_box()))
+
+        self._page_cells_cache[key] = entries
+        while len(self._page_cells_cache) > PAGE_CELL_CACHE_PAGES:
+            self._page_cells_cache.popitem(last=False)
+        return entries
+
+    def cells_in_bbox(self, page_no: int, cell_unit: TextCellUnit, bbox: BoundingBox,
+                      ios: float = 0.8) -> list:
+        """The cells of a page that ``bbox`` covers.
+
+        The semantics of ``SegmentedPdfPage.get_cells_in_bbox`` -- same origin
+        handling, same intersection-over-self threshold -- without its per-call
+        copy of the page.
+
+        The cells come back shared rather than copied, so a caller must treat
+        them as read-only: writing to one would rewrite what the next query on
+        the same page sees. Every caller here only measures them.
+        """
+        return [cell for cell, cell_bbox in self._page_cells(page_no, cell_unit, bbox.coord_origin)
+                if cell_bbox.intersection_over_self(bbox) > ios]
+
     def add_line_heights(self, snippet: TextItem) -> list[float]:
         snippet_bbox = snippet.prov[0].bbox
-        lines = self.pdf_doc.get_page(snippet.prov[0].page_no).get_cells_in_bbox(cell_unit=TextCellUnit.LINE, bbox=snippet_bbox)
+        lines = self.cells_in_bbox(snippet.prov[0].page_no, TextCellUnit.LINE, snippet_bbox)
         heights = []
         for line in lines:
             # check if line is in snippet bbox
@@ -181,7 +337,9 @@ class SnippetGraphConstructor():
                 left, right, bottom, top = min(xs), max(xs), min(ys), max(ys)
                 if top - bottom <= RULE_MAX_HEIGHT and right - left >= RULE_MIN_WIDTH * width:
                     dividers.append(top)
-                if right - left >= BOX_MIN_WIDTH and top - bottom >= BOX_MIN_HEIGHT:
+                covers_page = (right - left >= BOX_MAX_PAGE_COVERAGE * width
+                               and top - bottom >= BOX_MAX_PAGE_COVERAGE * height)
+                if not covers_page and right - left >= BOX_MIN_WIDTH and top - bottom >= BOX_MIN_HEIGHT:
                     boxes.append((left, right, bottom, top))
             self._page_shapes_cache[page_no] = (sorted(set(dividers), reverse=True), boxes)
         return self._page_shapes_cache[page_no]
@@ -220,6 +378,20 @@ class SnippetGraphConstructor():
         numbers, parent lookup, grouping -- reads this order, so it is repaired here."""
         ordered = sorted(enumerate(snippets), key=lambda item: (self.block_of(item[1]), item[0]))
         return [snippet for _, snippet in ordered]
+
+    def reading_key(self, page_no: int, bbox: BoundingBox) -> tuple[int, int, int, float]:
+        """Where an item sits in the reading order of the document, as a sortable key.
+
+        Text nodes are numbered in reading order, but media nodes are numbered within
+        the media list, so the two cannot be compared by sequence_no; this key places
+        them against each other. It follows the same layout rules as the node order:
+        blocks are read one after the other (see order_by_page_blocks), and within a
+        block the left column precedes the right one."""
+        page = self.pdf_doc.get_page(page_no)
+        box = bbox.to_bottom_left_origin(page.dimension.height)
+        block = sum(1 for divider in self.page_dividers(page_no) if box.t < divider)
+        column = 0 if (box.l + box.r) / 2 < page.dimension.width / 2 else 1
+        return page_no, block, column, -box.t
 
     def column_of(self, snippet: TextSnippet) -> int:
         """Which half of the page a snippet sits in. The corpus is set in two columns;
@@ -323,18 +495,95 @@ class SnippetGraphConstructor():
 
     @staticmethod
     def _is_unfinished(text: str) -> bool:
-        """Whether a fragment breaks off mid-sentence: no terminal punctuation, ending on
-        a lower case letter, a comma or a hyphen."""
+        """Whether a fragment breaks off mid-sentence: no terminal punctuation, and ending
+        on a comma, a hyphen, or a lower case *word*.
+
+        The last word decides it, not the last character: "Universitätsmedizin
+        Greifswald, Deutschland" ends on a lower case letter but is a complete
+        affiliation, while "... Nierenersatztherapie, koronare" ends on a lower case
+        word that demands the noun following it across the break."""
         stripped = text.rstrip()
         if not stripped or TERMINAL_PUNCTUATION.search(text):
             return False
-        return stripped[-1] in CONTINUATION_BREAKS or (stripped[-1].isalpha() and stripped[-1].islower())
+        if TRAILING_EMAIL.search(stripped):
+            return False
+        if stripped[-1] in CONTINUATION_BREAKS:
+            return True
+        return stripped.split()[-1][:1].islower()
 
     @staticmethod
     def _resumes(text: str) -> bool:
-        """Whether a fragment picks up a sentence: it starts in lower case."""
+        """Whether a fragment picks up the sentence the previous one broke off.
+
+        A lower case opening is the clearest case, but German resumes on a capitalised
+        noun about as often ("... koronare" / "Herzkrankheit, periphere arterielle
+        ..."), so case alone cannot decide this. What the case test was really keeping
+        out is the short list of things that legitimately open a column without
+        continuing anything: a caption, a numbered affiliation or reference, a new
+        bibliography entry. Those are excluded by name instead, which is what lets a
+        capitalised continuation through."""
         stripped = text.lstrip()
-        return bool(stripped) and stripped[0].isalpha() and stripped[0].islower()
+        if not stripped or CAPTION_PATTERN.match(stripped):
+            return False
+        # an opening bracket belongs to the continuation: "... Qualitätskontrolle" /
+        # "(Kontrolllösungsmessung) erfüllen, ..."
+        stripped = stripped.lstrip("([")
+        if not stripped or NUMBERED_ENTRY.match(stripped) or BIBLIOGRAPHY_ENTRY.match(stripped):
+            return False
+        return stripped[0].isalpha()
+
+    def merge_line_fragments(self, snippets: list[TextSnippet]) -> list[TextSnippet]:
+        """Join the consecutive lines of one text block inside a figure, a sidebar or
+        the masthead.
+
+        Docling clusters running text into paragraphs, but reads these three regions
+        line by line: a five-line bullet of a flowchart arrives as five snippets, each
+        a sentence fragment, and every one of them becomes its own graph node. They are
+        rejoined here on geometry -- same column, directly underneath, horizontally
+        overlapping -- combined with the same continuation tests
+        :meth:`stitch_continuations` uses, so only fragments that read as one running
+        text are joined and two separate labels of a diagram are left alone.
+
+        Body text never enters this: there docling's clustering is right, and joining
+        neighbouring bullets of an enumeration would destroy the list."""
+        merged: list[TextSnippet] = []
+        tail: TextSnippet | None = None  # last fragment folded into merged[-1]
+        for snippet in snippets:
+            previous = tail or (merged[-1] if merged else None)
+            if previous is not None and self._is_line_fragment_of(previous, snippet):
+                self.logger.debug(
+                    f"Merging line fragment {snippet.text_item.self_ref} into "
+                    f"{merged[-1].text_item.self_ref} ({snippet.region}).")
+                merged[-1] = self._merge_continuation(merged[-1], snippet)
+                tail = snippet
+            else:
+                merged.append(snippet)
+                tail = None
+        if len(merged) < len(snippets):
+            self.logger.info(f"Merged {len(snippets) - len(merged)} line fragments into "
+                             f"{len(merged)} snippets (was {len(snippets)}).")
+        return merged
+
+    def _is_line_fragment_of(self, previous: TextSnippet, snippet: TextSnippet) -> bool:
+        """Whether `snippet` is the next line of the block `previous` ends."""
+        if previous.region != snippet.region or snippet.region not in LINE_FRAGMENT_REGIONS:
+            return False
+        if previous.text_item.prov[0].page_no != snippet.text_item.prov[0].page_no:
+            return False
+        if not self._is_unfinished(previous.text_item.text) or not self._resumes(snippet.text_item.text):
+            return False
+        # the previous snippet may already hold several merged lines: measure the gap
+        # from the last of them, which is the prov this one follows
+        above = previous.text_item.prov[-1].bbox.to_bottom_left_origin(
+            self.pdf_doc.get_page(previous.text_item.prov[-1].page_no).dimension.height)
+        below = self._normalized_bbox(snippet)
+        gap = above.b - below.t
+        if gap < 0 or gap > max(MAX_LINE_FRAGMENT_GAP,
+                                LINE_FRAGMENT_GAP_RATIO * min(above.t - above.b, below.t - below.b)):
+            return False
+        overlap = min(above.r, below.r) - max(above.l, below.l)
+        narrower = min(above.r - above.l, below.r - below.l)
+        return narrower > 0 and overlap / narrower > MIN_LINE_FRAGMENT_OVERLAP
 
     def _normalized_bbox(self, snippet: TextSnippet):
         prov = snippet.text_item.prov[0]
@@ -389,7 +638,7 @@ class SnippetGraphConstructor():
         signal on its own -- some documents set subsections in a taller face than
         the sections that contain them -- whereas the font key is stable per style.
         Returns None when no font information is available."""
-        chars = self.pdf_doc.get_page(snippet.prov[0].page_no).get_cells_in_bbox(cell_unit=TextCellUnit.CHAR, bbox=snippet.prov[0].bbox)
+        chars = self.cells_in_bbox(snippet.prov[0].page_no, TextCellUnit.CHAR, snippet.prov[0].bbox)
         keys = Counter(cell.font_key for cell in chars if getattr(cell, "font_key", None))
         return keys.most_common(1)[0][0] if keys else None
 
@@ -411,6 +660,105 @@ class SnippetGraphConstructor():
             else:
                 kept.append(pic)
         return kept
+
+    def merge_table_continuations(self, tables: list[TableItem]) -> list[TableItem]:
+        """Join a table that runs on to the next page back into one table item.
+
+        ``docling_doc.tables`` holds one item per layout cluster, and a table broken
+        by a page break is two of them: two table nodes with half the rows each, the
+        caption on the first only, and a continuation that no caption match can ever
+        reach. The rows of the second are appended to the first, which keeps the
+        node's markdown and HTML whole and lets ``provenance`` report both pages.
+
+        A continuation is recognised by its stub -- the row labels a continued table
+        repeats -- or, when the halves share no labels, by resuming at the same width
+        without a header row of its own. Both also have to sit at the page break: low
+        on one page, high on the next."""
+        self._table_continuations = {}
+        merged: list[TableItem] = []
+        for table in tables:
+            head = merged[-1] if merged else None
+            if head is not None and self._continues_table(head, table):
+                self.logger.info(f"Merging table {table.self_ref} into {head.self_ref}: "
+                                 f"continued from page {head.prov[-1].page_no} to {table.prov[0].page_no}.")
+                self._table_continuations.setdefault(head.self_ref, []).append(table.self_ref)
+                merged[-1] = self._merge_table(head, table)
+            else:
+                merged.append(table)
+        return merged
+
+    def _continues_table(self, head: TableItem, tail: TableItem) -> bool:
+        """Whether `tail` is the rest of the table `head` breaks off at the page end."""
+        if not head.prov or not tail.prov:
+            return False
+        head_prov, tail_prov = head.prov[-1], tail.prov[0]
+        if tail_prov.page_no != head_prov.page_no + 1:
+            return False  # only page breaks: a column break separates two tables here
+        head_box = head_prov.bbox.to_bottom_left_origin(self.pdf_doc.get_page(head_prov.page_no).dimension.height)
+        tail_box = tail_prov.bbox.to_bottom_left_origin(self.pdf_doc.get_page(tail_prov.page_no).dimension.height)
+        if head_box.b > TABLE_CONTINUATION_MAX_BOTTOM * self.pdf_doc.get_page(head_prov.page_no).dimension.height:
+            return False
+        if tail_box.t < TABLE_CONTINUATION_MIN_TOP * self.pdf_doc.get_page(tail_prov.page_no).dimension.height:
+            return False
+        if self._repeats_stub(head, tail):
+            return True
+        # no shared row labels: a continuation then has to resume in the same shape,
+        # and carry no header row of its own
+        same_shape = (head.data.num_cols == tail.data.num_cols
+                      and abs((head_box.r - head_box.l) - (tail_box.r - tail_box.l)) <= TABLE_CONTINUATION_MAX_WIDTH_DELTA)
+        return same_shape and not self._has_header_row(tail)
+
+    @staticmethod
+    def _stub(table: TableItem) -> list[str]:
+        """The table's row labels: the text of its first column, one entry per row."""
+        return [" ".join(row[0].text.split()) for row in table.data.grid if row]
+
+    @classmethod
+    def _repeats_stub(cls, head: TableItem, tail: TableItem) -> bool:
+        """Whether the two halves carry the same row labels, as a continued table does.
+
+        Two shared labels at least: the guideline layout sets every recommendation in
+        its own two-row table headed "Empfehlungen", so a single shared label says
+        nothing about whether they belong together."""
+        head_labels = {label for label in cls._stub(head) if label}
+        tail_labels = {label for label in cls._stub(tail) if label}
+        if not head_labels or not tail_labels:
+            return False
+        shared = head_labels & tail_labels
+        return (len(shared) >= TABLE_CONTINUATION_MIN_SHARED_LABELS
+                and len(shared) / min(len(head_labels), len(tail_labels)) >= TABLE_CONTINUATION_MIN_STUB_OVERLAP)
+
+    @staticmethod
+    def _has_header_row(table: TableItem) -> bool:
+        grid = table.data.grid
+        return bool(grid) and any(cell.column_header for cell in grid[0])
+
+    @staticmethod
+    def _merge_table(head: TableItem, tail: TableItem) -> TableItem:
+        """Append the rows of a continuation to the table it continues.
+
+        Row offsets of the continuation are shifted past the head's rows and its
+        header flags dropped -- a repeated header is the same header, not a second
+        one -- so the merged grid reads as one table. Column counts may differ when
+        the two halves were parsed separately; each cell keeps its own column
+        offsets and the grid is as wide as the wider half."""
+        shift = head.data.num_rows
+        continued = [cell.model_copy(update={
+            "start_row_offset_idx": cell.start_row_offset_idx + shift,
+            "end_row_offset_idx": cell.end_row_offset_idx + shift,
+            "column_header": False,
+        }) for cell in tail.data.table_cells]
+        data = head.data.model_copy(update={
+            "table_cells": [*head.data.table_cells, *continued],
+            "num_rows": head.data.num_rows + tail.data.num_rows,
+            "num_cols": max(head.data.num_cols, tail.data.num_cols),
+        })
+        return head.model_copy(update={
+            "data": data,
+            "prov": [*head.prov, *tail.prov],
+            # the continuation is rarely captioned; keep whichever caption exists
+            "captions": list(head.captions) or list(tail.captions),
+        })
 
     @staticmethod
     def _bbox_position_key(pic: PictureItem) -> tuple[int, int, int, int]:
@@ -531,11 +879,18 @@ class SnippetGraphConstructor():
                                 matched=True
                                 break
             if not matched:
-                # no caption or no match: assign to closest preceding heading
-                preceding_headers = [node for node in text_nodes if node.level in self.levels.header_levels() and node.sequence_no < image.sequence_no]
+                # no caption or no match: assign to the section it is printed in, i.e. the
+                # closest heading above it in reading order. Asides are skipped: a figure
+                # label or the title of a sidebar box heads no section of the document, so
+                # a table printed past one still belongs to the body section around it.
+                image_key = self.reading_key(image.page_no, image.bbox)
+                preceding_headers = [node for node in text_nodes
+                                     if node.level in self.levels.header_levels()
+                                     and node.region not in (REGION_SIDEBAR, REGION_FIGURE)
+                                     and self.reading_key(node.page_no, node.bbox) < image_key]
                 if preceding_headers:
-                    lowest_level_header = min(preceding_headers, key=lambda n: n.level)
-                    ret_images[i] = image.model_copy(update={"level": lowest_level_header.level + 1, "level_label": "Unreferenced Image", "parent_id": lowest_level_header.snippet_id})
+                    closest_header = max(preceding_headers, key=lambda n: self.reading_key(n.page_no, n.bbox))
+                    ret_images[i] = image.model_copy(update={"level": closest_header.level + 1, "level_label": "Unreferenced Image", "parent_id": closest_header.snippet_id})
 
         return ret_images
 
@@ -572,9 +927,25 @@ class SnippetGraphConstructor():
 
     def compute_table_nodes(self, tables: list[TableItem], text_nodes: list[TextSnippetNode]) -> list[TableSnippetNode]:
         return self._build_media_nodes(tables, text_nodes, TableSnippetNode, lambda table: {
-            "markdown_serialization": table.export_to_markdown(self.docling_doc),
+            "markdown_serialization": self.table_markdown(table),
             "html_serialization": table.export_to_html(self.docling_doc, add_caption=True),
+            "continuation_refs": self._table_continuations.get(table.self_ref, []),
         })
+
+    def table_markdown(self, table: TableItem) -> str:
+        """The table body as markdown, without the caption.
+
+        ``export_to_markdown(doc)`` prepends the caption whenever docling linked one
+        itself, which would then appear twice: once from here and once from
+        ``caption_text``, the node's own caption field (and the only place a caption
+        recovered by :meth:`recover_caption_node` shows up at all). Stripping it here
+        keeps ``caption_text`` the single source of the caption, whichever way it was
+        found. Passing no ``doc`` would also drop it, but that call is deprecated."""
+        markdown = table.export_to_markdown(self.docling_doc)
+        caption = table.caption_text(self.docling_doc).strip()
+        if caption and markdown.lstrip().startswith(caption):
+            markdown = markdown.lstrip()[len(caption):]
+        return markdown.lstrip("\n")
 
     def get_caption_nodes(self, image: PictureItem | TableItem, text_nodes: list[TextSnippetNode]) -> list[TextSnippetNode] | list:
         # find text node that contains reference to image or table
@@ -658,17 +1029,26 @@ class SnippetGraphConstructor():
                 return node.snippet_id
         return ROOT_NODE_ID
 
-    def compute_edge_weight(self, parent: SnippetNode | None, child: SnippetNode) -> float:
-        weights = self.edge_weights
+    def edge_relation(self, parent: SnippetNode | None, child: SnippetNode) -> str:
+        """The structural relation a parent->child edge realizes.
+
+        Kept apart from the weight itself so every metric can read the relation:
+        the rule-based weights look it up in the config, and the content metrics
+        use it to tell a bullet from a subheading.
+        """
         if isinstance(child, (ImageSnippetNode, TableSnippetNode)):
             if child.level_label == "Unreferenced Image":
-                return weights.unreferenced_media
-            return weights.media
+                return RELATION_UNREFERENCED_MEDIA
+            return RELATION_MEDIA
         if child.is_grouped:
-            return weights.list_item
+            return RELATION_LIST_ITEM
         if child.level_label in ("Title", "Heading") and parent is not None and parent.level_label in ("Title", "Heading"):
-            return weights.section
-        return weights.text
+            return RELATION_SECTION
+        return RELATION_TEXT
+
+    def compute_edge_weight(self, parent: SnippetNode | None, child: SnippetNode) -> float:
+        """The structural weight of a parent->child edge."""
+        return self.edge_weights.structural_weight(self.edge_relation(parent, child))
 
     def construct_snippet_edges(self, nodes: list[SnippetNode], root_id: str) -> list[WeightedEdge]:
         """Build weighted parent->child edges; nodes without a resolvable parent attach to the document root."""
@@ -679,10 +1059,14 @@ class SnippetGraphConstructor():
                 continue  # the root node has no parent
             parent = node_by_id.get(node.parent_id) if node.parent_id else None
             if parent is not None and parent.snippet_id != node.snippet_id:
-                edges.append((parent.snippet_id, node.snippet_id, self.compute_edge_weight(parent, node)))
+                relation = self.edge_relation(parent, node)
+                edges.append((parent.snippet_id, node.snippet_id,
+                              self.edge_weights.structural_weight(relation)))
+                self._edge_relations[(parent.snippet_id, node.snippet_id)] = relation
             else:
                 # missing or dangling parent_id: attach to the document root
                 edges.append((root_id, node.snippet_id, self.edge_weights.root))
+                self._edge_relations[(root_id, node.snippet_id)] = RELATION_ROOT
         return edges
 
     def connect_components(self, nodes: list[SnippetNode], edges: list[WeightedEdge], root_id: str) -> list[WeightedEdge]:
@@ -707,6 +1091,7 @@ class SnippetGraphConstructor():
             # attach the structurally highest node of the component to the root
             top = min(component_nodes, key=lambda n: (n.level, n.sequence_no))
             extra_edges.append((root_id, top.snippet_id, self.edge_weights.root))
+            self._edge_relations[(root_id, top.snippet_id)] = RELATION_ROOT
         return extra_edges
 
     def construct_reference_edges(self, media_nodes: list[ImageSnippetNode | TableSnippetNode]) -> list[WeightedEdge]:
@@ -720,10 +1105,11 @@ class SnippetGraphConstructor():
         for node in media_nodes:
             for referencing_id in node.referencing_node_ids:
                 edges.append((referencing_id, node.snippet_id, self.edge_weights.reference))
+                self._edge_relations[(referencing_id, node.snippet_id)] = RELATION_REFERENCE
         return edges
 
     def node_texts(self, nodes: list[SnippetNode], root_id: str) -> dict[str, str]:
-        """Text content per node id, used for content-based relevancy weights."""
+        """Text content per node id, used for content-based edge weights."""
         texts = {}
         if root_id == ROOT_NODE_ID:
             # synthetic root is not part of the node lists
@@ -737,17 +1123,55 @@ class SnippetGraphConstructor():
                 texts[node.snippet_id] = node.text
         return texts
 
+    def build_edge_context(self, nodes: list[SnippetNode], root_id: str,
+                           edges: list[Edge]) -> EdgeContext:
+        """The document as an edge weight metric sees it.
+
+        Carries more than the texts, because the need estimators ask what kind
+        of unit a node is (a bullet, a heading, a table) and the surprisal
+        control needs the tree shape to find a non-ancestor parent.
+        """
+        texts = self.node_texts(nodes, root_id)
+        units: dict[str, Unit] = {}
+        if root_id == ROOT_NODE_ID:
+            units[ROOT_NODE_ID] = Unit(
+                node_id=ROOT_NODE_ID, text=texts.get(ROOT_NODE_ID, ""),
+                label="document_root", level_label="Root", level=-1, kind=KIND_ROOT,
+            )
+        for node in nodes:
+            if isinstance(node, TableSnippetNode):
+                kind = KIND_TABLE
+            elif isinstance(node, ImageSnippetNode):
+                kind = KIND_IMAGE
+            else:
+                kind = KIND_TEXT
+            units[node.snippet_id] = Unit(
+                node_id=node.snippet_id,
+                text=texts.get(node.snippet_id, ""),
+                label=node.label,
+                level_label=node.level_label,
+                level=node.level,
+                sequence_no=node.sequence_no,
+                is_grouped=node.is_grouped,
+                kind=kind,
+            )
+        return EdgeContext(units=units, edges=list(edges), relations=dict(self._edge_relations))
+
     def get_graph(self, save_to="") -> SnippetGraph:
+        self._edge_relations = {}
         text_nodes, image_nodes, table_nodes = self.construct_snippet_nodes()
         all_nodes: list[SnippetNode] = text_nodes + image_nodes + table_nodes
         root_id = self.resolve_root_id(text_nodes)
         edges = self.construct_snippet_edges(all_nodes, root_id)
         edges += self.connect_components(all_nodes, edges, root_id)
         reference_edges = self.construct_reference_edges(image_nodes + table_nodes)
-        if self.edge_weights.relevancy.enabled:
-            # apply in one pass so both edge kinds share the same score normalization
-            combined = apply_relevancy_weights(edges + reference_edges, self.node_texts(all_nodes, root_id), self.edge_weights.relevancy)
+        if self.edge_weights.metric != "structural" or self.edge_weights.combination != "replace":
+            # weigh both edge kinds in one pass so they share a score normalization
+            all_edges = edges + reference_edges
+            ctx = self.build_edge_context(all_nodes, root_id, [(p, c) for p, c, _ in all_edges])
+            combined = apply_edge_weights(all_edges, ctx, self.edge_weights)
             edges, reference_edges = combined[:len(edges)], combined[len(edges):]
         if save_to != "":
             self.write_nx_graph(save_to, text_nodes, image_nodes, table_nodes, edges, root_id, reference_edges)
-        return SnippetGraph(text_nodes, image_nodes, table_nodes, edges, reference_edges, root_id)
+        return SnippetGraph(text_nodes, image_nodes, table_nodes, edges, reference_edges, root_id,
+                            self.page_geometry(), dict(self._edge_relations))
