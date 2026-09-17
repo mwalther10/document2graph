@@ -293,6 +293,8 @@ config = ExtractorConfig(
         assign_regions=True,             # body / front_matter / sidebar / figure
         recover_captions=True,           # find captions docling left unlinked to their figure
         filter_decorative_pictures=True, # drop logos and rules
+        absorb_figure_text=True,         # fold a chart's labels into the picture node
+        figure_label_max_tokens=8,       # above this a figure-region node is prose, and stays
         level_source="hybrid",           # "hybrid" | "typography" | "docling"
     ),
 )
@@ -307,6 +309,18 @@ a hand-labelled review of 298 candidate splits across the test corpus:
   one another in the same column, and read as one continuing text, are merged back into
   one snippet. Body text is deliberately excluded: there docling's clustering is right,
   and joining neighbouring bullets would destroy the list. Needs `assign_regions`.
+- `absorb_figure_text` — a chart is read line by line, so its axis ticks and data points
+  arrive as one node each: `"42"`, `"33"`, `"51"`. None of them is retrievable on its own
+  and the picture that gives them meaning has no text at all, so the whole figure is
+  invisible to a retriever. The labels become the picture's `figure_text`, in reading
+  order, and stop being nodes. Across the twenty-document test corpus, 87% of
+  figure-region nodes are five tokens or fewer — in a chart-heavy document that is 86–97%
+  of *everything* — and folding them in takes the corpus from 12515 units to 8520, while
+  132 pictures that had no text become retrievable. A figure-region node above
+  `figure_label_max_tokens` is prose rather than a label — a flowchart step, a boxed
+  note — and stays a node of its own, though it still appears in the digest so the figure
+  reads whole. Captions are never absorbed, nor is a node that parents another. Needs
+  `assign_regions`.
 - `merge_table_continuations` — `docling_doc.tables` holds one item per layout cluster,
   so a table broken by a page break arrives as two, with half the rows each and the
   caption on the first only. The continuation's rows are appended to the head, whose
@@ -458,6 +472,14 @@ sections   = merge_units(graph, MergePolicy(strategy="subtree"))
 | `all_ancestors` | the node plus every ancestor up to the root |
 | `weighted` | the node plus ancestors while the edge weight clears `min_weight` (and the running product clears `min_cumulative`) |
 | `subtree` | one unit per heading, holding its whole subtree |
+
+`min_tokens` is a floor on the other end: a node whose own text falls below it is folded
+into the nearest ancestor that *is* a unit, rather than standing as one. It is a floor and
+not a filter — merging only ever walks upwards, so a node simply left out would take its
+text out of the corpus with it — and a fragment with no eligible ancestor keeps its own
+unit for the same reason. It is 0 by default, and it is the retrieval-time counterpart to
+`PipelineFlags.absorb_figure_text`, which catches the same problem at its source where the
+fragments sit inside a figure.
 
 `all_ancestors` is the baseline the weighted policy has to beat, and it has to beat it **at
 equal token budget rather than at equal recall**: withholding nothing can hardly lose
@@ -673,20 +695,20 @@ config = ExtractorConfig(
 | `Chunk` | `chunk_id`, `document_id`, `filename`, `text`, `meta`, `provenance`, `baseline_description`, `embedding` |
 | `Provenance` | `page_no`, `bbox`, `charspan` |
 | `PageGeometry` | `page_no`, `width`, `height` (the page box every stored `bbox` is expressed against) |
-| `MergePolicy` | `strategy` (none/all_ancestors/subtree/weighted), `min_weight`, `min_cumulative`, `max_tokens`, `separator`, `breadcrumb_separator` |
+| `MergePolicy` | `strategy` (none/all_ancestors/subtree/weighted), `min_weight`, `min_cumulative`, `min_tokens`, `max_tokens`, `separator`, `breadcrumb_separator` |
 | `MergedUnit` | `unit_id`, `document_id`, `text`, `member_ids`, `breadcrumb`, `token_count`, `provenance`, `page_no`, `node_type`, `merged_edges` |
 | `MergedEdge` | `parent_id`, `child_id`, `weight`, `cumulative` |
 | `ExpansionPolicy` | `mode` (none/parent/ancestors/siblings/subtree/auto_merge/reference_edges), `min_siblings`, `min_edge_weight`, `max_added_tokens`, `max_tokens_per_unit`, `dedupe`, `separator` |
 | `ExpandedHit` | `unit: MergedUnit`, `score`, `hit_id`, `reason`, `added_ids`, `absorbed_ids`, `added_tokens` |
 | `Calibration` | `policy`, `target_mean_tokens`, `achieved_mean_tokens`, `relative_error`, `within(tolerance)` |
 | `DocumentGraph` | `document_id`, `filename`, `title`, `root_id`, `snippets: list[GraphSnippet]`, `edges`, `reference_edges`, `pages: list[PageGeometry]`, `edge_relations` |
-| `GraphSnippet` | everything on `Snippet` plus `local_ref`, `parent_local_ref`, `snippet_type`, `line_heights`, `font_key`, `level_height`, `extracted_at` |
+| `GraphSnippet` | everything on `Snippet` plus `local_ref`, `parent_local_ref`, `snippet_type`, `line_heights`, `font_key`, `level_height`, `extracted_at`. A media snippet's `text` is what the node is made of: a table is its caption above its markdown, a picture its caption above whatever is printed inside the figure |
 | `Document` | `document_id`, `document_type`, `filename`, `title`, `metadata: DocumentMetadata` |
 | `DocumentMetadata` | `version`, `authors`, `institutions`, `bibliography`, `correspondence` |
 | `MetadataExtractionConfig` | `title_page`, `version`, `authors`, `institutions`, `bibliography`, `correspondence` (each a `MetadataFieldConfig`) |
 | `MetadataFieldConfig` | `label` (search string), `pages` (inclusive 1-based page range, e.g. `(1, 3)`) |
 | `ChunkerConfig` | `tokenizer` (HF tokenizer name), `max_tokens`, `merge_peers` |
-| `PipelineFlags` | `repair_reading_order`, `stitch_continuations`, `merge_line_fragments`, `merge_table_continuations`, `assign_regions`, `recover_captions`, `filter_decorative_pictures`, `level_source` (hybrid/typography/docling) |
+| `PipelineFlags` | `repair_reading_order`, `stitch_continuations`, `merge_line_fragments`, `merge_table_continuations`, `assign_regions`, `recover_captions`, `filter_decorative_pictures`, `absorb_figure_text`, `figure_label_max_tokens`, `level_source` (hybrid/typography/docling) |
 | `EdgeWeightConfig` | `section`, `text`, `list_item`, `media`, `unreferenced_media`, `reference`, `root` (structural weights by relation), `metric` (structural/uniform/similarity/inverted_similarity/need_supply), `combination` (replace/mean/multiply), `similarity: SimilarityConfig`, `need: NeedConfig`, `supply: SupplyConfig` |
 | `SimilarityConfig` | `backend` (bm25/embedding/blend), `embedding_model`, `alpha`, `bm25_k1`, `bm25_b`, `bm25_scoring` (child_query/symmetric_mean/symmetric_max) |
 | `NeedConfig` | `estimator` (uniform/reference_density/syntactic/surprisal/blend), `blend_weights`, `reference_density: ReferenceDensityConfig`, `syntactic: SyntacticConfig`, `surprisal: SurprisalConfig` |

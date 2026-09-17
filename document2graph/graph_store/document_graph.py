@@ -32,7 +32,12 @@ if TYPE_CHECKING:  # avoid a circular import: the extractor imports the store
 # 3: added DocumentGraph.edge_relations, without which a reloaded graph cannot
 # reproduce its own weights: three relations are facts about how an edge was
 # created and are not recoverable from the two nodes it joins.
-SCHEMA_VERSION = 3
+# 4: a media snippet's text now composes every part of it -- a table carries its
+# caption above its markdown, a picture carries the text printed inside it -- where
+# before a table's text was the markdown alone. A graph written under 3 has tables
+# with no caption anywhere in their text, which a consumer should be able to tell
+# apart from a table whose caption was never found.
+SCHEMA_VERSION = 4
 
 # snippet_type of the synthetic root node materialized for documents with no title node
 ROOT_SNIPPET_TYPE = "root"
@@ -143,12 +148,15 @@ class DocumentGraph(BaseModel):
         extracted_at = datetime.now(timezone.utc).isoformat()
 
         snippets: list[GraphSnippet] = []
-        for node, snippet_type, text_attr in (
-            *[(n, "text", "text") for n in graph.text_nodes],
-            *[(n, "image", "caption_text") for n in graph.image_nodes],
-            *[(n, "table", "markdown_serialization") for n in graph.table_nodes],
+        for node, snippet_type in (
+            *[(n, "text") for n in graph.text_nodes],
+            *[(n, "image") for n in graph.image_nodes],
+            *[(n, "table") for n in graph.table_nodes],
         ):
-            text = (getattr(node, text_attr, "") or "").replace("\x00", "")
+            # a media node composes its text from several fields and says how itself;
+            # a text node is its text
+            raw = node.content_text() if hasattr(node, "content_text") else node.text
+            text = (raw or "").replace("\x00", "")
             snippets.append(
                 GraphSnippet(
                     snippet_id=global_id(document_id, node.snippet_id),

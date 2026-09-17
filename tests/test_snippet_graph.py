@@ -28,6 +28,7 @@ from document2graph.models import (
     ImageSnippetNode,
     MetadataExtractionConfig,
     PipelineFlags,
+    Provenance,
     TextSnippet,
     TextSnippetNode,
 )
@@ -133,6 +134,8 @@ def constructor() -> SnippetGraphConstructor:
     c.edge_weights = EdgeWeightConfig()
     c._edge_relations = {}
     c._document_metadata = Document(document_id="doc-1", title="Test Doc")
+    c.flags = PipelineFlags()
+    c.logger = Log("test").logger
     return c
 
 
@@ -845,3 +848,110 @@ def test_the_page_cell_cache_stays_bounded():
     for page_no in range(PAGE_CELL_CACHE_PAGES * 3):
         c.cells_in_bbox(page_no, TextCellUnit.LINE, box)
     assert len(c._page_cells_cache) == PAGE_CELL_CACHE_PAGES
+
+
+# --------------------------------------------------------------------------- #
+# absorbing a figure's own labels
+# --------------------------------------------------------------------------- #
+def make_figure_label(idx: int, picture: ImageSnippetNode, text: str) -> TextSnippetNode:
+    """One line read out of a chart: region "figure", parented on the picture."""
+    node = make_text_node(idx, level=3, level_label="Body", parent_id=picture.snippet_id,
+                          region="figure")
+    node.text = text
+    return node
+
+
+def test_a_pictures_labels_become_the_pictures_text(constructor: SnippetGraphConstructor):
+    """A bar chart arrives as one node per number. None of them is retrievable and
+    the picture holding them has no text at all, so the whole figure is invisible."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0", caption_text="Abb. 1")
+    labels = [make_figure_label(i, picture, text) for i, text in enumerate(["42", "33", "51"], 1)]
+
+    remaining = constructor.absorb_figure_text(labels, [picture])
+
+    assert remaining == []
+    assert picture.figure_text == "42 · 33 · 51"
+    assert picture.content_text() == "Abb. 1\n42 · 33 · 51"
+
+
+def test_absorbed_labels_read_in_the_order_the_page_has_them(constructor: SnippetGraphConstructor):
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    labels = [make_figure_label(i, picture, text) for i, text in enumerate(["erst", "dann"], 1)]
+
+    constructor.absorb_figure_text(list(reversed(labels)), [picture])
+
+    assert picture.figure_text == "erst · dann"
+
+
+def test_figure_prose_stays_a_node_of_its_own(constructor: SnippetGraphConstructor):
+    """A flowchart step reads on its own and is worth retrieving on its own; it is
+    still part of what the figure says, so it is in the digest as well."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    label = make_figure_label(1, picture, "42")
+    prose = make_figure_label(2, picture, "Bei einem HbA1c ueber acht Prozent wird die Therapie eskaliert.")
+
+    remaining = constructor.absorb_figure_text([label, prose], [picture])
+
+    assert [node.snippet_id for node in remaining] == [prose.snippet_id]
+    assert prose.text in picture.figure_text
+
+
+def test_a_caption_is_never_absorbed(constructor: SnippetGraphConstructor):
+    """It is already the media node's own field: absorbing it would print it twice."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0", caption_text="Abb. 1")
+    caption = make_figure_label(1, picture, "Abb. 1")
+    picture.caption_nodes = [caption]
+
+    remaining = constructor.absorb_figure_text([caption], [picture])
+
+    assert [node.snippet_id for node in remaining] == [caption.snippet_id]
+
+
+def test_a_figure_node_with_children_is_never_absorbed(constructor: SnippetGraphConstructor):
+    """Removing it would leave its children hanging off a node that is gone."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    parent = make_figure_label(1, picture, "Gruppe")
+    child = make_text_node(2, level=4, level_label="Body", parent_id=parent.snippet_id, region="figure")
+    child.text = "42"
+
+    remaining = constructor.absorb_figure_text([parent, child], [picture])
+
+    # "Gruppe" is short enough to absorb and sits right under the picture, and is kept
+    # anyway; the child hangs off it rather than off the picture and was never a
+    # candidate
+    assert [node.snippet_id for node in remaining] == [parent.snippet_id, child.snippet_id]
+
+
+def test_only_absorbed_labels_hand_over_their_geometry(constructor: SnippetGraphConstructor):
+    """A label that stays a node still reports its own box; the picture must not
+    report it too, or one region of the page is returned by two units."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    label = make_figure_label(1, picture, "42")
+    label.provenance = [Provenance(page_no=4, charspan=(0, 2))]
+    prose = make_figure_label(2, picture, "Bei einem HbA1c ueber acht Prozent wird eskaliert.")
+    prose.provenance = [Provenance(page_no=5, charspan=(0, 10))]
+
+    constructor.absorb_figure_text([label, prose], [picture])
+
+    assert [entry.page_no for entry in picture.provenance] == [4]
+
+
+def test_body_text_is_left_alone(constructor: SnippetGraphConstructor):
+    """The rule is about how a figure is read, not about how short a node is."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    body = make_text_node(1, level=3, level_label="Body", parent_id=picture.snippet_id)
+    body.text = "42"
+
+    remaining = constructor.absorb_figure_text([body], [picture])
+
+    assert [node.snippet_id for node in remaining] == [body.snippet_id]
+    assert picture.figure_text == ""
+
+
+def test_the_flag_off_leaves_every_node_where_it_was(constructor: SnippetGraphConstructor):
+    constructor.flags = PipelineFlags(absorb_figure_text=False)
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    labels = [make_figure_label(i, picture, text) for i, text in enumerate(["42", "33"], 1)]
+
+    assert constructor.absorb_figure_text(labels, [picture]) == labels
+    assert picture.figure_text == ""

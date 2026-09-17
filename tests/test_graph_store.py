@@ -13,6 +13,7 @@ from document2graph.models import (
     ImageSnippetNode,
     PageGeometry,
     Provenance,
+    TableSnippetNode,
     TextSnippetNode,
 )
 from document2graph.utils.ids import chunk_id_for, document_id_for
@@ -227,3 +228,71 @@ def test_edge_relations_survive_the_round_trip(snippet_graph: SnippetGraph, tmp_
     assert reloaded.relation(global_id(DOC_ID, "#/texts/0"), image_id) == "unreferenced_media"
     assert reloaded.relation(text_id, image_id) == "reference"
     assert reloaded.relation(text_id, "nonexistent") is None
+
+
+# --------------------------------------------------------------------------- #
+# what a media snippet's text is made of
+# --------------------------------------------------------------------------- #
+TABLE_MARKDOWN = "| Ziel | Wert |\n|---|---|\n| HbA1c | < 7% |"
+
+
+def make_table_node(idx: int, parent_id: str | None) -> TableSnippetNode:
+    return TableSnippetNode(
+        snippet_id=f"#/tables/{idx}",
+        document_id=DOC_ID,
+        label="table",
+        sequence_no=idx,
+        level=2,
+        level_label="table",
+        parent_id=parent_id,
+        docling_parent_ref=RefItem(**{"$ref": "#/body"}),
+        docling_self_ref=RefItem(**{"$ref": f"#/tables/{idx}"}),
+        caption_text=f"Tab. {idx} Therapieziele",
+        markdown_serialization=TABLE_MARKDOWN,
+        html_serialization="<table></table>",
+        bbox=BoundingBox(l=0, t=200, r=300, b=100, coord_origin=CoordOrigin.BOTTOMLEFT),
+        page_no=2,
+        provenance=[Provenance(page_no=2, bbox=BoundingBox(l=0, t=200, r=300, b=100))],
+    )
+
+
+@pytest.fixture
+def media_graph() -> SnippetGraph:
+    title = make_text_node(0, level=0, parent_id=None)
+    picture = make_image_node(0, parent_id="#/texts/0")
+    picture.figure_text = "42 · 33 · 51"
+    return SnippetGraph(
+        text_nodes=[title],
+        image_nodes=[picture],
+        table_nodes=[make_table_node(0, parent_id="#/texts/0")],
+        edges=[("#/texts/0", "#/pictures/0", 0.9), ("#/texts/0", "#/tables/0", 0.9)],
+        reference_edges=[],
+        root_id="#/texts/0",
+        pages=[PageGeometry(page_no=1, width=595.0, height=842.0)],
+    )
+
+
+def snippet_text(graph: DocumentGraph, local_ref: str) -> str:
+    return next(s.text for s in graph.snippets if s.local_ref == local_ref)
+
+
+def test_a_table_keeps_its_caption_and_its_rows(tmp_path, media_graph):
+    """The caption is the only part of a table written as a sentence, and so the only
+    part a query is likely to match; the row breaks are what makes the rest readable
+    as a table at all. Both used to be absent from the persisted graph."""
+    path = tmp_path / "graph.json"
+    save_graph(DocumentGraph.from_snippet_graph(media_graph, make_document()), str(path))
+
+    text = snippet_text(load_graph(str(path)), "#/tables/0")
+
+    assert text.startswith("Tab. 0 Therapieziele\n")
+    assert TABLE_MARKDOWN in text
+    assert text.count("\n") == 3
+
+
+def test_a_picture_carries_the_text_printed_inside_it(tmp_path, media_graph):
+    """Without it a chart is a snippet with nothing in it, which is not retrievable."""
+    path = tmp_path / "graph.json"
+    save_graph(DocumentGraph.from_snippet_graph(media_graph, make_document()), str(path))
+
+    assert snippet_text(load_graph(str(path)), "#/pictures/0") == "Abbildung 0\n42 · 33 · 51"

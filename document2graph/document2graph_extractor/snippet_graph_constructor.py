@@ -39,12 +39,18 @@ from ..edge_weights import (
 from ..edge_weights.context import KIND_IMAGE, KIND_ROOT, KIND_TABLE, KIND_TEXT
 from ..utils.log import Log
 from ..utils.provenance import provenance_from_prov
+from ..utils.tokens import approximate_token_count
 from .level_classifier import LevelClassifier
 from .metadata_extractor import DocumentMetadataExtractor
 
 T = TypeVar('T', bound=ImageSnippetNode)
 
 ROOT_NODE_ID = "#/document-root"
+
+# joins the labels absorbed into a picture. A chart's ticks and data points were
+# never a sentence, and joining them with a space would read as one -- a middot
+# keeps them legible as the separate labels they are.
+FIGURE_TEXT_SEPARATOR = " · "
 
 # caption recovery: caption-like text ("Tab. 3", "Abb.1", "Figure 2", ...) adjacent
 # to a media bbox is treated as its caption. Above/below captions may be up to
@@ -997,7 +1003,13 @@ class SnippetGraphConstructor():
             nx_graph.add_node(ROOT_NODE_ID, label="document_root", level=-1, level_label="Root", text=self._document_metadata.title or "")
         for node in text_nodes:
             nx_graph.add_node(node.snippet_id, label=node.label, level=node.level, level_label=node.level_label, text=node.text, line_heights=str(node.line_heights), font_key=node.font_key or "", level_height=node.level_height if node.level_height is not None else -1.0, region=node.region)
-        for node in image_nodes + table_nodes:
+        for node in image_nodes:
+            # caption plus whatever is printed inside the figure: without the latter a
+            # chart shows up in the viewer as a node with nothing in it
+            nx_graph.add_node(node.snippet_id, label=node.label, level=node.level, level_label=node.level_label, text=node.content_text())
+        for node in table_nodes:
+            # caption only: a markdown table in a GEXF attribute is unreadable in a
+            # graph viewer, and the json is the form that carries it
             nx_graph.add_node(node.snippet_id, label=node.label, level=node.level, level_label=node.level_label, text=node.caption_text)
         for parent_id, child_id, weight in edges:
             nx_graph.add_edge(parent_id, child_id, weight=weight, edge_type="hierarchy")
@@ -1007,10 +1019,64 @@ class SnippetGraphConstructor():
                 nx_graph.add_edge(source_id, target_id, weight=weight, edge_type="reference")
         return nx_graph
 
+    def absorb_figure_text(self, text_nodes: list[TextSnippetNode],
+                           media_nodes: list[ImageSnippetNode]) -> list[TextSnippetNode]:
+        """Fold a figure's own labels into the picture node they sit in.
+
+        A chart is read line by line, so its axis ticks and data points arrive as one
+        node each: "42", "33", "51". None of them is retrievable on its own -- there is
+        nothing in "42" for a query to match, and nothing in it for a reader to use --
+        while the picture that gives them their meaning carries no text at all and is
+        therefore not retrievable either. Folding the labels into the picture fixes
+        both ends: the figure becomes one unit holding its own contents.
+
+        What is *not* absorbed is as important as what is. A node above
+        ``figure_label_max_tokens`` is prose set inside a figure -- a step of a
+        flowchart, a note in a boxed diagram -- which reads on its own and stays a node
+        of its own, though it still appears in the digest so that the figure reads
+        whole. A caption is never absorbed: it is already the media node's own field.
+        Nor is a node that parents another, which absorbing would orphan.
+
+        Runs after the media nodes have their captions and their parents, because both
+        decide what may be taken.
+        """
+        if not self.flags.absorb_figure_text:
+            return text_nodes
+
+        captions = {caption.snippet_id for node in media_nodes for caption in node.caption_nodes}
+        parents = {node.parent_id for node in text_nodes if node.parent_id}
+
+        grouped: dict[str, list[TextSnippetNode]] = defaultdict(list)
+        for node in text_nodes:
+            if node.region == REGION_FIGURE and node.parent_id:
+                grouped[node.parent_id].append(node)
+
+        absorbed: set[str] = set()
+        for media in media_nodes:
+            members = sorted(grouped.get(media.snippet_id, []), key=lambda n: n.sequence_no)
+            if not members:
+                continue
+            media.figure_text = FIGURE_TEXT_SEPARATOR.join(
+                text for text in (member.text.strip() for member in members) if text)
+            takeable = [member for member in members
+                        if member.snippet_id not in captions
+                        and member.snippet_id not in parents
+                        and approximate_token_count(member.text) <= self.flags.figure_label_max_tokens]
+            # only what is actually removed hands over its geometry: a label that stays
+            # a node of its own still reports its own box, and would otherwise report it twice
+            media.provenance += [entry for member in takeable for entry in member.provenance]
+            absorbed.update(member.snippet_id for member in takeable)
+
+        if absorbed:
+            self.logger.info(f"Absorbed {len(absorbed)} figure labels into "
+                             f"{sum(1 for m in media_nodes if m.figure_text)} media nodes.")
+        return [node for node in text_nodes if node.snippet_id not in absorbed]
+
     def construct_snippet_nodes(self) -> tuple[list[TextSnippetNode], list[ImageSnippetNode], list[TableSnippetNode]]:
         text_nodes = self.compute_text_nodes(self.text_items)
         image_nodes = self.compute_image_nodes(self.image_items, text_nodes)
         table_nodes = self.compute_table_nodes(self.table_items, text_nodes) 
+        text_nodes = self.absorb_figure_text(text_nodes, image_nodes + table_nodes)
         return text_nodes, image_nodes, table_nodes
 
     def resolve_root_id(self, text_nodes: list[TextSnippetNode]) -> str:
@@ -1115,12 +1181,8 @@ class SnippetGraphConstructor():
             # synthetic root is not part of the node lists
             texts[ROOT_NODE_ID] = self._document_metadata.title or ""
         for node in nodes:
-            if isinstance(node, TableSnippetNode):
-                texts[node.snippet_id] = f"{node.caption_text}\n{node.markdown_serialization}".strip()
-            elif isinstance(node, ImageSnippetNode):
-                texts[node.snippet_id] = node.caption_text
-            else:
-                texts[node.snippet_id] = node.text
+            texts[node.snippet_id] = (node.content_text() if isinstance(node, ImageSnippetNode)
+                                      else node.text)
         return texts
 
     def build_edge_context(self, nodes: list[SnippetNode], root_id: str,

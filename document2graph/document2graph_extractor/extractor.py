@@ -98,10 +98,9 @@ class DocumentGraphExtractor:
     def _get_text_value_for_snippet_type(self, node, snippet_type:str) -> str:
         if snippet_type == SnippetType.TEXT:
             return node.text
-        elif snippet_type == SnippetType.IMAGE:
-            return node.caption_text
-        elif snippet_type == SnippetType.TABLE:
-            return node.markdown_serialization
+        elif snippet_type in (SnippetType.IMAGE, SnippetType.TABLE):
+            # the node composes its own text: caption plus whatever else it holds
+            return node.content_text()
         else:
             raise ValueError(f"Unknown snippet type: {snippet_type}")
 

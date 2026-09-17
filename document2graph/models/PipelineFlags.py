@@ -32,6 +32,17 @@ class PipelineFlags(BaseModel):
     recover_captions: bool = True
     # drop logos, rules and other pictures that carry no content
     filter_decorative_pictures: bool = True
+    # fold a figure's own labels -- axis ticks, data points, legend entries -- into
+    # the picture node they sit in. Docling reads a chart line by line and
+    # merge_line_fragments only rejoins lines that read as one running text, so a bar
+    # chart arrives as dozens of one-token nodes, each of which would otherwise be a
+    # retrievable unit of its own while the picture holding them has no text at all.
+    # Needs assign_regions.
+    absorb_figure_text: bool = True
+    # a figure-region node at or below this many tokens is a label and is absorbed.
+    # Above it the node is figure *prose* -- a flowchart step, a boxed note -- which
+    # reads on its own and stays a node of its own.
+    figure_label_max_tokens: int = 8
 
     # how heading levels are ranked:
     # "hybrid"     - (font, height) styles ordered by how they nest in reading order

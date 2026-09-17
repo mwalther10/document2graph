@@ -91,8 +91,16 @@ def test_a_title_node_root_is_a_unit_but_a_synthetic_one_is_not():
 
 
 @pytest.mark.parametrize("strategy", ["none", "all_ancestors", "weighted", "subtree"])
-def test_no_node_loses_its_text(graph, strategy):
-    units = merge_units(graph, MergePolicy(strategy=strategy, min_weight=0.0))
+@pytest.mark.parametrize("min_tokens", [0, 4, 100])
+def test_no_node_loses_its_text(graph, strategy, min_tokens):
+    """The floor decides what stands on its own, never what survives.
+
+    ``min_tokens=100`` puts every node in this graph below the floor, which is the
+    case that catches a floor implemented as a filter: merging only walks upwards, so
+    a node left out of the unit set with nothing to fold it into is simply gone.
+    """
+    units = merge_units(graph, MergePolicy(strategy=strategy, min_weight=0.0,
+                                           min_tokens=min_tokens))
     covered = {member for unit in units for member in unit.member_ids}
     assert {s.snippet_id for s in graph.snippets} - covered == set()
 
@@ -273,3 +281,165 @@ def test_calibration_tries_every_distinct_weight_when_there_are_few(graph):
 def test_calibration_rejects_a_target_that_cannot_be_a_size(graph):
     with pytest.raises(ValueError):
         calibrate_min_weight([graph], MergePolicy(strategy="weighted"), 0.0)
+
+
+# --------------------------------------------------------------------------- #
+# regressions
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def overflowing_section() -> DocumentGraph:
+    """One heading with three body paragraphs, too much text to merge as one.
+
+        root "Doc"
+         +- H "Heading"
+             +- P1 / P2 / P3, ten words each
+    """
+    body = " ".join(f"wort{i}" for i in range(10))
+    return DocumentGraph(
+        document_id=DOC, filename="doc.pdf", title="Doc", root_id=ROOT,
+        snippets=[
+            snippet(ROOT, "Doc", 0, level_label="Title"),
+            snippet("#/h", "Heading", 1, level_label="Heading"),
+            snippet("#/p1", body, 2),
+            snippet("#/p2", body, 3),
+            snippet("#/p3", body, 4),
+        ],
+        edges=[(ROOT, "#/h", 1.0), ("#/h", "#/p1", 0.8),
+               ("#/h", "#/p2", 0.8), ("#/h", "#/p3", 0.8)],
+    )
+
+
+def test_a_truncated_subtree_leaves_its_tail_retrievable(overflowing_section):
+    """``max_tokens`` may split a section; it must not delete the rest of it.
+
+    The heading stops merging at the budget. Whatever it did not reach is
+    carried by no unit, so it has to stand alone -- otherwise its text *and its
+    geometry* are absent from the corpus, and a retrieval benchmark built on
+    these units is scoring a document it cannot see all of.
+    """
+    units = merge_units(overflowing_section, MergePolicy(strategy="subtree", max_tokens=15))
+
+    carried = {member_id for unit in units for member_id in unit.member_ids}
+    text_bearing = {s.snippet_id for s in overflowing_section.snippets if s.text.strip()}
+    assert text_bearing <= carried, f"dropped from the corpus: {sorted(text_bearing - carried)}"
+
+    # and the tail is reachable on its own terms, not only as somebody's member
+    assert {"#/p2", "#/p3"} <= {unit.unit_id for unit in units}
+
+
+def test_every_unit_stays_within_the_token_budget(overflowing_section):
+    """The tail is rescued as separate units, not by overflowing the budget."""
+    policy = MergePolicy(strategy="subtree", max_tokens=15)
+    for unit in merge_units(overflowing_section, policy):
+        assert approximate_token_count(unit.text) <= policy.max_tokens
+
+
+@pytest.fixture
+def labelled_chart() -> DocumentGraph:
+    """A textless picture with a data label under it -- the chart-page shape.
+
+    The picture sits on page 9 and everything else on page 1, so provenance
+    that leaked from the picture is visible as a page number.
+    """
+    picture = snippet("#/pic", "", 1, page_no=9, snippet_type="image")
+    picture.provenance = [Provenance(page_no=9, charspan=(0, 0))]
+    return DocumentGraph(
+        document_id=DOC, filename="doc.pdf", title="Doc", root_id=ROOT,
+        snippets=[
+            snippet(ROOT, "Doc", 0, level_label="Title"),
+            picture,
+            snippet("#/label", "38", 2),
+        ],
+        edges=[(ROOT, "#/pic", 0.9), ("#/pic", "#/label", 0.8)],
+    )
+
+
+def test_a_merged_ancestor_with_no_text_contributes_no_geometry(labelled_chart):
+    """A unit reading "38" must not claim the box of the chart it sits in.
+
+    Provenance is what a unit *returned*, and a textless picture returns
+    nothing. Claiming it would let this unit cover a figure's gold region under
+    an overlap metric while the text a retriever indexed is one number.
+    """
+    unit = unit_by_id(merge_units(labelled_chart, MergePolicy(strategy="weighted")), "#/label")
+
+    assert "#/pic" in unit.member_ids  # it is still an ancestor of the unit
+    assert unit.text.endswith("38")  # the title merges too, the textless picture does not
+    assert 9 not in [p.page_no for p in unit.provenance], (
+        "the textless picture on page 9 leaked its geometry into a text unit"
+    )
+    assert unit.provenance, "the unit still has to be placeable on a page"
+
+
+# --------------------------------------------------------------------------- #
+# the min_tokens floor
+# --------------------------------------------------------------------------- #
+def test_a_node_below_the_floor_is_not_a_unit_of_its_own(graph):
+    """"zweimal taeglich" is two words: nothing in it for a query to match."""
+    units = merge_units(graph, MergePolicy(strategy="none", min_tokens=5))
+    assert "#/b" not in {unit.unit_id for unit in units}
+
+
+def test_a_node_below_the_floor_joins_its_nearest_standing_ancestor(graph):
+    """The bullet reads under the paragraph that introduces it, in that order.
+
+    Nearest, not any: folding it into the heading two levels up would put it next to
+    text it never sat next to on the page.
+    """
+    paragraph = unit_by_id(merge_units(graph, MergePolicy(strategy="none", min_tokens=5)), "#/p")
+
+    assert paragraph.member_ids == ["#/p", "#/b"]
+    assert paragraph.text == "Die Dosis wird angepasst:\n\nzweimal taeglich"
+
+
+def test_a_node_below_the_floor_is_folded_into_exactly_one_unit(graph):
+    units = merge_units(graph, MergePolicy(strategy="none", min_tokens=5))
+    holders = [unit.unit_id for unit in units if "#/b" in unit.member_ids]
+    assert holders == ["#/p"]
+
+
+def test_a_chain_of_small_nodes_folds_onto_the_one_that_still_stands(graph):
+    """A host has to be a unit itself, or the fold lands on something unretrievable.
+
+    A floor above every node in the document leaves only the title, which stands
+    because there is nothing above it to fold *it* into. Everything else belongs
+    there -- not to the nearest ancestor, which is itself folded away.
+    """
+    units = merge_units(graph, MergePolicy(strategy="none", min_tokens=7))
+
+    assert [unit.unit_id for unit in units] == [ROOT]
+    assert units[0].member_ids == [ROOT, "#/h1", "#/h2", "#/p", "#/b", "#/p2"]
+
+
+def test_a_small_node_with_nowhere_to_go_keeps_its_own_unit():
+    """Better a unit too small than a piece of the document nothing can return.
+
+    The synthetic root is not a unit, so a fragment stranded on it has no host; the
+    floor has to leave it alone rather than drop it.
+    """
+    stranded = DocumentGraph(
+        document_id=DOC, filename="doc.pdf", title="Doc", root_id=ROOT,
+        snippets=[snippet(ROOT, "Doc", 0, level_label="Title", snippet_type="root"),
+                  snippet("#/frag", "Fortsetzung", 1)],
+        edges=[(ROOT, "#/frag", 0.1)],
+    )
+    units = merge_units(stranded, MergePolicy(strategy="none", min_tokens=4))
+
+    assert [unit.unit_id for unit in units] == ["#/frag"]
+
+
+def test_a_folded_child_is_charged_to_the_budget_before_any_ancestor(graph):
+    """The fold is not droppable, so it is what an ancestor has to fit around."""
+    policy = MergePolicy(strategy="all_ancestors", min_tokens=5, max_tokens=12)
+    paragraph = unit_by_id(merge_units(graph, policy), "#/p")
+
+    # the bullet is in; the heading above is what did not fit around it
+    assert paragraph.member_ids == ["#/p", "#/b"]
+    assert approximate_token_count(paragraph.text) <= policy.max_tokens
+
+
+def test_the_floor_does_not_disturb_a_graph_that_clears_it(graph):
+    """min_tokens=0 is the default and has to change nothing at all."""
+    policy = dict(strategy="weighted", min_weight=0.5)
+    assert ([u.model_dump() for u in merge_units(graph, MergePolicy(**policy))]
+            == [u.model_dump() for u in merge_units(graph, MergePolicy(**policy, min_tokens=0))])

@@ -46,9 +46,16 @@ class MergePolicy(BaseModel):
     # it makes a long chain of mediocre edges stop sooner than a short strong one.
     min_cumulative: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    # a node whose own text counts below this does not become a unit of its own: its
+    # text joins the nearest ancestor that does, so nothing is dropped. 0 is the
+    # behaviour described above, one unit per text-bearing node. This is the
+    # retrieval-time counterpart of PipelineFlags.absorb_figure_text and catches what
+    # that cannot -- a fragment no picture contains.
+    min_tokens: int = Field(default=0, ge=0)
+
     # a merged unit stops growing here. Ancestors are taken nearest first, so what
     # a tight budget drops is the outermost context rather than the closest.
-    max_tokens: int = Field(default=512, gt=0)
+    max_tokens: int = Field(default=1024, gt=0)
 
     separator: str = "\n\n"
     breadcrumb_separator: str = " > "

@@ -37,7 +37,7 @@ merged into them and through their breadcrumb.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Container, Sequence
 
 from ..graph_store.document_graph import (
     ROOT_SNIPPET_TYPE,
@@ -46,29 +46,11 @@ from ..graph_store.document_graph import (
 )
 from ..models.MergedUnit import MergedEdge, MergedUnit
 from ..models.MergePolicy import MergePolicy
-
-TokenCounter = Callable[[str], int]
+from ..utils.tokens import TokenCounter, approximate_token_count
 
 # Level labels the pipeline gives a node that heads a section rather than
 # carrying body text. Mirrors edge_weights.context.Unit.is_heading.
 HEADING_LABELS = ("Title", "Heading", "Root")
-
-
-def approximate_token_count(text: str) -> int:
-    """A tokenizer-free estimate: whichever of words and quarter-characters is larger.
-
-    Only a stand-in. A budget comparison has to charge every condition with the
-    *same* tokenizer as the retriever that will embed the text, so a real
-    comparison passes ``count_tokens=huggingface_token_counter(...)``; this is
-    what makes the module usable, and its tests fast, without a model download.
-
-    Two estimates because either alone is wrong in a direction that matters here:
-    characters over four underestimates German compounds, word count
-    underestimates a table row that is mostly punctuation.
-    """
-    if not text:
-        return 0
-    return max(len(text.split()), len(text) // 4)
 
 
 def huggingface_token_counter(model_name: str) -> TokenCounter:
@@ -193,10 +175,57 @@ class DocumentTree:
         node = self.nodes.get(node_id)
         return bool(node and node.snippet_type == ROOT_SNIPPET_TYPE)
 
-    def unit_nodes(self) -> list[GraphSnippet]:
-        """Every node that can be a unit: has text, and is on a page."""
+    def unit_nodes(self, absorbed: Container[str] = ()) -> list[GraphSnippet]:
+        """Every node that can be a unit: has text, is on a page, stands on its own."""
         return [node for node in self.nodes.values()
-                if not self.is_synthetic_root(node.snippet_id) and (node.text or "").strip()]
+                if not self.is_synthetic_root(node.snippet_id) and (node.text or "").strip()
+                and node.snippet_id not in absorbed]
+
+    def absorbed_children(self, policy: MergePolicy,
+                          count: TokenCounter) -> dict[str, list[str]]:
+        """Host node id -> the sub-threshold nodes folded into its unit, in reading order.
+
+        ``min_tokens`` is a floor on what is worth retrieving on its own, not a filter:
+        a two-word fragment has nothing in it for a query to match, but it is still
+        part of the document and has to stay readable somewhere. Merging only ever
+        walks *up*, so a node left out of the unit set would have its text dropped from
+        the corpus entirely -- hence a host, and hence the escape below.
+
+        A node whose ancestors are all either sub-threshold themselves, textless or the
+        synthetic root has nowhere to go and keeps its own unit. Better a unit too
+        small than a piece of the document that cannot be retrieved at all.
+        """
+        if policy.min_tokens <= 0:
+            return {}
+        eligible = {node.snippet_id for node in self.unit_nodes()}
+        hosts: dict[str, list[str]] = {}
+        for node_id in eligible:
+            if count(self.text_of(node_id)) >= policy.min_tokens:
+                continue
+            host_id = self._standing_ancestor(node_id, eligible, policy, count)
+            if host_id is not None:
+                hosts.setdefault(host_id, []).append(node_id)
+        for children in hosts.values():
+            children.sort(key=self._order)
+        return hosts
+
+    def _standing_ancestor(self, node_id: str, eligible: Container[str],
+                           policy: MergePolicy, count: TokenCounter) -> str | None:
+        """The nearest ancestor that is a unit in its own right, or None.
+
+        Whether an ancestor stands is not a property of that ancestor alone: one below
+        the floor stands anyway when there is nothing above it to fold *it* into, and
+        it is then a perfectly good host. So the chain is read outermost first, where
+        the question has an answer -- the topmost eligible ancestor always stands --
+        and each step down knows what is above it.
+        """
+        host_id: str | None = None
+        for ancestor_id, _ in reversed(self.ancestors(node_id)):
+            if ancestor_id not in eligible:
+                continue
+            if host_id is None or count(self.text_of(ancestor_id)) >= policy.min_tokens:
+                host_id = ancestor_id
+        return host_id
 
 
 def _breadcrumb(tree: DocumentTree, node_id: str) -> list[str]:
@@ -236,7 +265,8 @@ def _join(tree: DocumentTree, member_ids: Sequence[str], separator: str) -> str:
 
 
 def _fit_budget(tree: DocumentTree, node_id: str, candidates: Sequence[MergedEdge],
-                policy: MergePolicy, count: TokenCounter) -> tuple[list[MergedEdge], str]:
+                policy: MergePolicy, count: TokenCounter,
+                tail: Sequence[str] = ()) -> tuple[list[MergedEdge], str]:
     """Take ancestors while the *assembled* unit still fits the budget.
 
     Measured on the joined text rather than by summing the parts. The two differ
@@ -245,9 +275,12 @@ def _fit_budget(tree: DocumentTree, node_id: str, candidates: Sequence[MergedEdg
     not what gets reported, so budgeting by it let units past ``max_tokens``.
 
     A node whose own text is already over budget merges nothing: no ancestor
-    could fit, and the node cannot be split here.
+    could fit, and the node cannot be split here. ``tail`` -- the children
+    ``min_tokens`` folded into this node -- is part of "own text": it is not
+    droppable, so an ancestor may only have what is left after it.
     """
-    own_text = tree.text_of(node_id)
+    core = [node_id, *tail]
+    own_text = _join(tree, core, policy.separator)
     if count(own_text) > policy.max_tokens:
         return [], own_text
 
@@ -256,7 +289,7 @@ def _fit_budget(tree: DocumentTree, node_id: str, candidates: Sequence[MergedEdg
     for edge in candidates:
         trial = accepted + [edge]
         # `trial` runs outward from the node; the text reads the other way
-        trial_text = _join(tree, [e.parent_id for e in reversed(trial)] + [node_id], policy.separator)
+        trial_text = _join(tree, [e.parent_id for e in reversed(trial)] + core, policy.separator)
         if count(trial_text) > policy.max_tokens:
             break
         accepted, text = trial, trial_text
@@ -275,8 +308,15 @@ def _assemble(tree: DocumentTree, node: GraphSnippet, member_ids: Sequence[str],
     """
     if text is None:
         text = _join(tree, member_ids, separator)
+    # Only members that put text into the unit put geometry into it. A textless
+    # member -- overwhelmingly a picture merged as an ancestor -- contributed
+    # nothing to read, so claiming its box would let a unit whose whole text is
+    # "38" report the bounding box of the chart that number sits in, and be
+    # scored against region gold as though it had returned the chart. The unit's
+    # own node is always included: a picture unit still has to be placeable.
     provenance = [entry
                   for member_id in member_ids
+                  if member_id == node.snippet_id or tree.text_of(member_id)
                   for entry in (tree.nodes[member_id].provenance
                                 if member_id in tree.nodes else [])]
     return MergedUnit(
@@ -293,7 +333,9 @@ def _assemble(tree: DocumentTree, node: GraphSnippet, member_ids: Sequence[str],
     )
 
 
-def _subtree_units(tree: DocumentTree, policy: MergePolicy, count: TokenCounter) -> list[MergedUnit]:
+def _subtree_units(tree: DocumentTree, policy: MergePolicy, count: TokenCounter,
+                   absorbed: dict[str, list[str]] | None = None,
+                   folded: Container[str] = ()) -> list[MergedUnit]:
     """One unit per heading, holding its subtree; plus anything no heading covers.
 
     The text of a nested section appears in its own unit and in every heading
@@ -301,31 +343,53 @@ def _subtree_units(tree: DocumentTree, policy: MergePolicy, count: TokenCounter)
     makes a section node many times the size of a window, and why these units are
     only interpretable against a retrieved-token budget.
     """
-    unit_nodes = tree.unit_nodes()
-    # Only a heading that becomes a unit can carry anything. The synthetic root
-    # does not, so a node stranded directly on it is covered by nothing and has to
-    # stand alone -- 275 nodes across the test corpus sit directly under a root.
-    covering = {node.snippet_id for node in unit_nodes if tree.is_heading(node.snippet_id)}
+    absorbed = absorbed or {}
+    unit_nodes = tree.unit_nodes(folded)
 
     units: list[MergedUnit] = []
+    carried: set[str] = set()
+    plain: list[GraphSnippet] = []
     for node in unit_nodes:
-        if tree.is_heading(node.snippet_id):
-            members = [node.snippet_id]
-            text = tree.text_of(node.snippet_id)
-            # measured on the assembled text, for the reason given in _fit_budget
-            for descendant_id in tree.descendants(node.snippet_id):
-                if not tree.text_of(descendant_id):
-                    continue
-                trial = members + [descendant_id]
-                trial_text = _join(tree, trial, policy.separator)
-                if count(trial_text) > policy.max_tokens:
-                    break
-                members, text = trial, trial_text
-            units.append(_assemble(tree, node, members, policy.separator, count, [], text))
-        elif not any(ancestor_id in covering
-                     for ancestor_id, _ in tree.ancestors(node.snippet_id)):
-            # no heading unit covers it, so nothing else would carry its text
-            units.append(_assemble(tree, node, [node.snippet_id], policy.separator, count, []))
+        if not tree.is_heading(node.snippet_id):
+            plain.append(node)
+            continue
+        members = [node.snippet_id]
+        text = tree.text_of(node.snippet_id)
+        # measured on the assembled text, for the reason given in _fit_budget
+        for descendant_id in tree.descendants(node.snippet_id):
+            if not tree.text_of(descendant_id):
+                continue
+            trial = members + [descendant_id]
+            trial_text = _join(tree, trial, policy.separator)
+            if count(trial_text) > policy.max_tokens:
+                # stop rather than skip ahead: a unit has to read as the document
+                # reads, so the tail is left for the pass below to place
+                break
+            members, text = trial, trial_text
+        carried.update(members)
+        units.append(_assemble(tree, node, members, policy.separator, count, [], text))
+
+    # Whatever no heading unit actually ended up carrying has to stand alone.
+    # Membership, not ancestry: a node stranded directly on the synthetic root is
+    # covered by nothing, but so is one whose heading hit ``max_tokens`` before
+    # reaching it, and the second kind is invisible to an ancestry test. Letting
+    # those fall through drops their text *and their geometry* from the corpus --
+    # 9.5% of text-bearing nodes on a 5-document MMDocIR sample at max_tokens=512.
+    for node in plain:
+        if node.snippet_id not in carried:
+            members = [node.snippet_id] + absorbed.get(node.snippet_id, [])
+            carried.update(members)
+            units.append(_assemble(tree, node, members, policy.separator, count, []))
+
+    # A folded node is normally covered twice over -- by the subtree that holds it and
+    # by its host -- but a heading that hit ``max_tokens`` first carries neither, and
+    # its host may have gone the same way. What nothing ended up holding stands alone,
+    # for the same reason the floor hands out a host in the first place.
+    for node_id in sorted({child for children in absorbed.values() for child in children},
+                          key=tree._order):
+        if node_id not in carried and node_id in tree.nodes:
+            carried.add(node_id)
+            units.append(_assemble(tree, tree.nodes[node_id], [node_id], policy.separator, count, []))
     return units
 
 
@@ -336,15 +400,20 @@ def merge_units(graph: DocumentGraph, policy: MergePolicy | None = None,
     count = count_tokens or approximate_token_count
     tree = DocumentTree(graph)
 
+    absorbed = tree.absorbed_children(policy, count)
+    folded = {child_id for children in absorbed.values() for child_id in children}
+
     if policy.strategy == "subtree":
-        units = _subtree_units(tree, policy, count)
+        units = _subtree_units(tree, policy, count, absorbed, folded)
     else:
         units = []
-        for node in tree.unit_nodes():
+        for node in tree.unit_nodes(folded):
+            tail = absorbed.get(node.snippet_id, [])
             candidates = _gated_ancestors(tree, node.snippet_id, policy)
-            edges, text = _fit_budget(tree, node.snippet_id, candidates, policy, count)
-            # `edges` runs outward from the node; the text reads the other way
-            members = [edge.parent_id for edge in reversed(edges)] + [node.snippet_id]
+            edges, text = _fit_budget(tree, node.snippet_id, candidates, policy, count, tail)
+            # `edges` runs outward from the node; the text reads the other way, and the
+            # folded children come after it, where the page has them
+            members = [edge.parent_id for edge in reversed(edges)] + [node.snippet_id] + tail
             units.append(_assemble(tree, node, members, policy.separator, count, edges, text))
 
     return sorted(units, key=lambda unit: tree._order(unit.unit_id))

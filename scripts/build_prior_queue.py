@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import sys
 from collections import Counter, defaultdict
 
@@ -67,8 +68,15 @@ def edge_uid(document_id: str, parent_ref: str, child_ref: str) -> str:
     return hashlib.sha256(f"{document_id}:{parent_ref}:{child_ref}".encode()).hexdigest()[:16]
 
 
-def clip(text: str) -> str:
-    text = " ".join(text.split())
+def clip(text: str, keep_lines: bool = False) -> str:
+    """Flatten a snippet to one line and cut it to MAX_CHARS, for the labeller.
+
+    ``keep_lines`` spares the line breaks, which a table cannot be read without: in a
+    one-line github table the row delimiter is ``| |``, which is also how an empty
+    cell is written, so the rows stop being recoverable and the judge is guessing at
+    what lines up with what.
+    """
+    text = re.sub(r"[ \t]+", " ", text).strip() if keep_lines else " ".join(text.split())
     return text if len(text) <= MAX_CHARS else text[:MAX_CHARS] + " […]"
 
 
@@ -117,8 +125,8 @@ def collect(graphs, languages, supply_config, regions):
                 "page_no": child.page_no,
                 "parent_type": parent.snippet_type,
                 "child_type": child.snippet_type,
-                "parent_text": clip(parent.text),
-                "child_text": clip(child.text),
+                "parent_text": clip(parent.text, keep_lines=parent.snippet_type == "table"),
+                "child_text": clip(child.text, keep_lines=child.snippet_type == "table"),
                 # to be filled in by hand; see README.md for the scale
                 "need": None,
                 "supply": None,
