@@ -1056,11 +1056,14 @@ class SnippetGraphConstructor():
             members = sorted(grouped.get(media.snippet_id, []), key=lambda n: n.sequence_no)
             if not members:
                 continue
+            # the caption is left out of the digest as well as out of the absorption:
+            # content_text() already puts caption_text first, so a caption printed
+            # inside the figure region would otherwise read twice over
+            digest = [member for member in members if member.snippet_id not in captions]
             media.figure_text = FIGURE_TEXT_SEPARATOR.join(
-                text for text in (member.text.strip() for member in members) if text)
-            takeable = [member for member in members
-                        if member.snippet_id not in captions
-                        and member.snippet_id not in parents
+                text for text in (member.text.strip() for member in digest) if text)
+            takeable = [member for member in digest
+                        if member.snippet_id not in parents
                         and approximate_token_count(member.text) <= self.flags.figure_label_max_tokens]
             # only what is actually removed hands over its geometry: a label that stays
             # a node of its own still reports its own box, and would otherwise report it twice

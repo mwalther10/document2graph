@@ -905,6 +905,27 @@ def test_a_caption_is_never_absorbed(constructor: SnippetGraphConstructor):
     remaining = constructor.absorb_figure_text([caption], [picture])
 
     assert [node.snippet_id for node in remaining] == [caption.snippet_id]
+    # and it is out of the digest too, not merely left standing as a node: the
+    # picture already carries it as caption_text, so a caption in the figure region
+    # read twice over in everything built on content_text()
+    assert picture.figure_text == ""
+    assert picture.content_text() == "Abb. 1"
+
+
+def test_a_caption_does_not_read_twice_among_the_labels(constructor: SnippetGraphConstructor):
+    """The caption sits between the labels in reading order, which is how it got into
+    the digest while still, correctly, staying a node of its own."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0", caption_text="Abb. 1")
+    first = make_figure_label(1, picture, "42")
+    caption = make_figure_label(2, picture, "Abb. 1")
+    last = make_figure_label(3, picture, "33")
+    picture.caption_nodes = [caption]
+
+    remaining = constructor.absorb_figure_text([first, caption, last], [picture])
+
+    assert [node.snippet_id for node in remaining] == [caption.snippet_id]
+    assert picture.figure_text == "42 · 33"
+    assert picture.content_text() == "Abb. 1\n42 · 33"
 
 
 def test_a_figure_node_with_children_is_never_absorbed(constructor: SnippetGraphConstructor):
