@@ -10,9 +10,13 @@ optionally combined with the structural weight of the edge's relation
 * ``"similarity"``          parent/child content similarity in [0, 1]
 * ``"inverted_similarity"`` ``1 - similarity``; the parent is worth attaching
                             when it does *not* repeat the child
-* ``"need_supply"``         ``need(child) * supply(child, parent)``: how much
-                            the child depends on outside context, times how
-                            much this particular parent delivers of it
+* ``"need_supply"``         how much the child depends on outside context,
+                            and how much this particular parent delivers of
+                            it. ``NeedSupplyConfig.composition`` decides how
+                            the two combine: ``"evidence"`` (default) starts
+                            every edge at a neutral 0.5 and lets evidence move
+                            it either way; ``"product"`` is the older
+                            ``need * supply`` with a prior-floored supply
 
 See ``document2graph.edge_weights`` for the implementations.
 """
@@ -325,6 +329,45 @@ class SupplyConfig(BaseModel):
     surprisal: SurprisalConfig = Field(default_factory=SurprisalConfig)
 
 
+class NeedSupplyConfig(BaseModel):
+    """How ``need`` and ``supply`` combine into one weight under ``metric="need_supply"``.
+
+    ``"evidence"`` -- the default::
+
+        w = 0.5 * (1 + merge_evidence - independence_evidence)
+
+        merge_evidence        = need * measured_supply
+        independence_evidence = (1 - need) * n / (n + independence_half_length)
+
+    Every edge starts at 0.5, because construction put it there: that the edge
+    exists is the structural fact, and it is the same fact for every relation, so
+    it is one number rather than a table of per-relation priors. Evidence then
+    moves it. A child that needs context this parent measurably delivers moves
+    toward 1; a child that shows it reads on its own moves toward 0; a child
+    nothing can be said about -- a three-word table cell, a picture -- stays at
+    0.5. That three-way split is the point: the product form scored "no pointers
+    found in three words" and "no pointers found in sixty" identically, at zero.
+
+    ``n`` is the child's word count, and ``n / (n + half_length)`` is how far the
+    absence of dependency signals can be trusted as evidence of independence: at
+    ``n == half_length`` it counts for half. Supply is the *measured* supply --
+    under ``SupplyConfig.metric="composite"`` the prior floor is not applied, so
+    no per-relation prior enters the weight.
+
+    Under this composition ``MergePolicy.min_weight`` has a reading: below 0.5 it
+    merges everything except children that show they stand alone, above 0.5 only
+    edges with positive evidence of need.
+
+    ``"product"`` is ``need * supply`` with supply as configured, floor included.
+    Kept for comparison against earlier runs.
+    """
+
+    composition: Literal["evidence", "product"] = "evidence"
+    # words at which "no dependency signal found" counts as half the evidence of
+    # independence it would be in an arbitrarily long unit
+    independence_half_length: float = Field(default=20.0, gt=0.0)
+
+
 class EdgeWeightConfig(BaseModel):
     """Weights assigned to graph edges.
 
@@ -351,6 +394,7 @@ class EdgeWeightConfig(BaseModel):
     similarity: SimilarityConfig = Field(default_factory=SimilarityConfig)
     need: NeedConfig = Field(default_factory=NeedConfig)
     supply: SupplyConfig = Field(default_factory=SupplyConfig)
+    need_supply: NeedSupplyConfig = Field(default_factory=NeedSupplyConfig)
 
     def structural_weight(self, relation: str) -> float:
         """The configured weight of a structural relation."""

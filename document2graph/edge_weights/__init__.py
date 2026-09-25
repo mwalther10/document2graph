@@ -8,12 +8,15 @@ weight is ``EdgeWeightConfig.combination``.
     uniform              1.0 everywhere -- the baseline
     similarity           parent/child content similarity
     inverted_similarity  1 - similarity (what "relevancy" used to compute)
-    need_supply          need(child) * supply(child, parent)
+    need_supply          need(child) and supply(child, parent), composed per
+                         EdgeWeightConfig.need_supply.composition
 
 ``need_supply`` is the new family: how much the child depends on outside
-context, times how much this particular parent delivers of it. ``need`` is a
+context, and how much this particular parent delivers of it. ``need`` is a
 question about the child alone (see :mod:`.need`); ``supply`` is what
-distinguishes one candidate parent from another.
+distinguishes one candidate parent from another. The default ``"evidence"``
+composition starts every edge at 0.5 and lets the two move it (see
+:mod:`.evidence`); ``"product"`` is ``need * supply``.
 
 Registering another metric takes no changes here::
 
@@ -50,6 +53,7 @@ from .context import (
 )
 from .counterfactual import as_supply, control_parents, recentre
 from .deps import MetricDeps
+from .evidence import evidence_components, evidence_weights, measured_supply
 from .from_graph import edge_context_from_graph, recompute_weights
 from .lexical import idf_table
 from .need import compute_need
@@ -99,6 +103,8 @@ def _inverted(ctx: EdgeContext, config: EdgeWeightConfig, deps: MetricDeps) -> d
 
 @register_metric("need_supply")
 def _need_supply(ctx: EdgeContext, config: EdgeWeightConfig, deps: MetricDeps) -> dict[Edge, float]:
+    if config.need_supply.composition == "evidence":
+        return evidence_weights(ctx, config, deps)
     need = compute_need(ctx, config.need, scorer=deps.scorer)
     supply = compute_supply(ctx, config, config.supply, deps)
     return {edge: need.get(edge, 0.0) * supply.get(edge, 0.0) for edge in ctx.edges}
@@ -174,8 +180,11 @@ __all__ = [
     "compute_supply",
     "content_similarity",
     "edge_context_from_graph",
+    "evidence_components",
+    "evidence_weights",
     "idf_table",
     "measured_components",
+    "measured_supply",
     "recentre",
     "inverted_similarity",
     "recompute_weights",

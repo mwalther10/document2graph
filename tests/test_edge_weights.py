@@ -4,6 +4,7 @@ import pytest
 from document2graph.models import (
     EdgeWeightConfig,
     NeedConfig,
+    NeedSupplyConfig,
     ReferenceDensityConfig,
     SimilarityConfig,
     SupplyConfig,
@@ -18,10 +19,13 @@ from document2graph.edge_weights import (
     compute_edge_weights,
     compute_metric,
     compute_need,
+    compute_supply,
     content_similarity,
+    evidence_components,
     inverted_similarity,
     register_metric,
 )
+from document2graph.edge_weights.context import KIND_TABLE, Unit
 from document2graph.edge_weights.lexical import bm25_similarity
 from document2graph.edge_weights.semantic import embedding_similarity
 from document2graph.edge_weights.reference_density import analyze_unit, unit_need
@@ -285,6 +289,7 @@ def test_need_supply_is_the_product_of_its_factors():
         metric="need_supply",
         need=NeedConfig(estimator="syntactic"),
         supply=SupplyConfig(metric="uniform"),
+        need_supply=NeedSupplyConfig(composition="product"),
     )
     need = compute_need(ctx, config.need)
     assert compute_metric(ctx, config)[("a", "b")] == pytest.approx(need[("a", "b")])
@@ -305,6 +310,88 @@ def test_need_supply_stays_in_unit_range():
                             similarity=SimilarityConfig(backend="bm25")),
     )
     assert all(0.0 <= value <= 1.0 for value in compute_metric(ctx, config).values())
+
+
+# --- the evidence composition ---------------------------------------------
+
+DE_POINTERS = ReferenceDensityConfig(language="de", use_spacy=False)
+
+
+def evidence_config(**supply) -> EdgeWeightConfig:
+    return EdgeWeightConfig(
+        metric="need_supply",
+        need=NeedConfig(estimator="reference_density", reference_density=DE_POINTERS),
+        supply=SupplyConfig(**(supply or {"metric": "uniform"})),
+    )
+
+
+def test_evidence_is_the_default_composition():
+    assert EdgeWeightConfig().need_supply.composition == "evidence"
+
+
+def test_an_edge_nothing_can_be_said_about_stays_neutral():
+    # a picture: no text, so no need, no pointers and nothing to judge independence by
+    ctx = ctx_of([("a", "b")], {"a": "Abbildung 3 zeigt die Werte", "b": ""})
+    assert compute_metric(ctx, evidence_config())[("a", "b")] == pytest.approx(0.5)
+
+
+def test_absent_pointers_count_by_how_much_text_they_were_absent_from():
+    short = "Metformin 500 mg"
+    long = ("Metformin wird bei Typ-2-Diabetes als Mittel der ersten Wahl empfohlen, "
+            "weil es gut verträglich ist, kein Hypoglykämierisiko hat und in großen "
+            "Studien eine Senkung kardiovaskulärer Ereignisse gezeigt hat, sofern "
+            "keine Kontraindikationen wie eine schwere Niereninsuffizienz vorliegen.")
+    ctx = ctx_of([("h", "s"), ("h", "l")], {"h": "Therapie", "s": short, "l": long})
+    weights = compute_metric(ctx, evidence_config())
+    # both raise no pointer, but only the long one has shown it stands alone
+    assert 0.4 < weights[("h", "s")] < 0.5
+    assert weights[("h", "l")] < 0.3
+    assert weights[("h", "l")] < weights[("h", "s")]
+
+
+def test_a_table_is_not_judged_by_prose_signals():
+    cells = " ".join(f"Wert{i} {i} mg" for i in range(30))
+    ctx = ctx_of([("p", "t")], {"p": "Dosierung", "t": cells})
+    ctx.units["t"] = Unit(node_id="t", text=cells, kind=KIND_TABLE)
+    parts = evidence_components(ctx, evidence_config())[("p", "t")]
+    assert parts["independence_evidence"] == 0.0
+    assert parts["weight"] >= 0.5
+
+
+def test_need_the_parent_delivers_drives_the_edge_above_neutral():
+    ctx = ctx_of([("p", "c")], {"p": "Die Dosis von Metformin.",
+                                "c": "Sie sollte reduziert werden."})
+    parts = evidence_components(ctx, evidence_config())[("p", "c")]
+    assert parts["need"] == pytest.approx(1.0)
+    assert parts["independence_evidence"] == pytest.approx(0.0)
+    assert parts["weight"] == pytest.approx(1.0)  # uniform supply delivers everything
+
+
+def test_supply_is_not_capped_by_a_prior_floor():
+    # zero measured supply must read as zero: the composite's prior floor would lift
+    # it to the text_text prior and cap how far measured supply can move the edge
+    # the parent only repeats the child, so neither measured component finds anything
+    ctx = ctx_of([("p", "c")], {"p": "Metformin", "c": "Metformin wird empfohlen"},
+                 {("p", "c"): "text"})
+    config = evidence_config(metric="composite")
+    assert compute_supply(ctx, config, config.supply, MetricDeps())[("p", "c")] >= 0.40
+    assert evidence_components(ctx, config)[("p", "c")]["supply"] == pytest.approx(0.0)
+
+
+def test_evidence_weights_stay_in_unit_range():
+    config = EdgeWeightConfig(metric="need_supply",
+                              need=NeedConfig(estimator="blend"),
+                              supply=SupplyConfig(similarity=SimilarityConfig(backend="bm25")))
+    assert all(0.0 <= value <= 1.0 for value in compute_metric(ctx_of(), config).values())
+
+
+def test_half_length_sets_how_fast_absence_becomes_evidence():
+    ctx = ctx_of([("h", "c")], {"h": "Therapie", "c": "Metformin wird empfohlen"})
+    quick = evidence_config().model_copy(
+        update={"need_supply": NeedSupplyConfig(independence_half_length=1.0)})
+    slow = evidence_config().model_copy(
+        update={"need_supply": NeedSupplyConfig(independence_half_length=100.0)})
+    assert compute_metric(ctx, quick)[("h", "c")] < compute_metric(ctx, slow)[("h", "c")]
 
 
 # --- dispatch and combination ---------------------------------------------

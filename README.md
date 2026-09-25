@@ -116,7 +116,7 @@ with the structural weight above is `EdgeWeightConfig.combination` (`replace`, `
 | `uniform` | `1.0` everywhere — the baseline any weighting has to beat |
 | `similarity` | parent/child content similarity in [0, 1] |
 | `inverted_similarity` | `1 - similarity`; the parent is worth attaching when it does *not* repeat the child |
-| `need_supply` | `need(child) * supply(child, parent)` |
+| `need_supply` | `0.5 * (1 + need x supply - independence)`: every edge starts neutral, evidence moves it (see below) |
 
 `similarity` comes from `SimilarityConfig.backend`:
 
@@ -190,14 +190,45 @@ are markedly better at finite verbs and clause structure.
 | `uniform` | need alone |
 | `structural`, `similarity`, `inverted_similarity`, `surprisal` | the earlier arms, kept for comparison |
 
-The composite keeps everything absolutely scaled and in [0, 1], so `need x supply`
-stays readable as the share of the child's context that is still missing after the
-merge. The floor is what keeps a three-word bullet or a table cell -- where both
-measured components return near zero by construction -- from reading as "this parent
-supplies nothing".
+#### Composing need and supply
 
-The priors are configurable per relation and ship with values measured from 50
-hand-labelled edges (`tests/.test-data/edge_labels.json`), not chosen by hand:
+`NeedSupplyConfig.composition` decides how the two become one weight. The default,
+`"evidence"`, uses no per-relation priors:
+
+```
+w = 0.5 * (1 + merge_evidence - independence_evidence)
+
+merge_evidence        = need x measured_supply
+independence_evidence = (1 - need) x n / (n + independence_half_length)
+```
+
+- **0.5 is the edge existing.** Construction attached the child to this parent. That
+  is the same structural fact for every relation, so it is one neutral value rather
+  than a table of priors that would need measuring and tuning.
+- **Merge evidence moves the edge toward 1:** the child needs context and this parent
+  measurably delivers it. Supply is the composite *without* its prior floor, so it spans
+  its full range rather than a 2.5x band above the floor.
+- **Independence evidence moves the edge toward 0:** the child shows no sign of needing
+  anything, weighted by how much text (`n` words) it had to show that in. A three-word
+  cell with no pointers stays near 0.5; a sixty-word self-contained paragraph drops well
+  below it. Tables and figures get no independence evidence, since the need estimators
+  read grammar and pointers and a table has neither.
+
+The product form scored "nothing could be measured" and "measured to stand alone"
+identically, at zero; this keeps them apart. It also gives `MergePolicy.min_weight` a
+reading: below 0.5 it merges everything except children that show they stand alone,
+above 0.5 only edges with positive evidence of need. `scripts/audit_edge_weights.py
+--section evidence` shows, per relation, which way the edges move and which term moved
+them.
+
+`composition="product"` is the earlier `need x supply`, with the composite's prior floor
+applied. It is kept for comparison with runs made under it. The floor was what kept a
+three-word bullet or a table cell -- where both measured components return near zero
+by construction -- from reading as "this parent supplies nothing"; the neutral start is
+what does that under `"evidence"`.
+
+The priors (used only by `"product"`) are configurable per relation and ship with values
+measured from 50 hand-labelled edges (`tests/.test-data/edge_labels.json`):
 
 ```python
 from document2graph.models import StructuralPriorConfig, SupplyConfig
@@ -709,13 +740,14 @@ config = ExtractorConfig(
 | `MetadataFieldConfig` | `label` (search string), `pages` (inclusive 1-based page range, e.g. `(1, 3)`) |
 | `ChunkerConfig` | `tokenizer` (HF tokenizer name), `max_tokens`, `merge_peers` |
 | `PipelineFlags` | `repair_reading_order`, `stitch_continuations`, `merge_line_fragments`, `merge_table_continuations`, `assign_regions`, `recover_captions`, `filter_decorative_pictures`, `absorb_figure_text`, `figure_label_max_tokens`, `level_source` (hybrid/typography/docling) |
-| `EdgeWeightConfig` | `section`, `text`, `list_item`, `media`, `unreferenced_media`, `reference`, `root` (structural weights by relation), `metric` (structural/uniform/similarity/inverted_similarity/need_supply), `combination` (replace/mean/multiply), `similarity: SimilarityConfig`, `need: NeedConfig`, `supply: SupplyConfig` |
+| `EdgeWeightConfig` | `section`, `text`, `list_item`, `media`, `unreferenced_media`, `reference`, `root` (structural weights by relation), `metric` (structural/uniform/similarity/inverted_similarity/need_supply), `combination` (replace/mean/multiply), `similarity: SimilarityConfig`, `need: NeedConfig`, `supply: SupplyConfig`, `need_supply: NeedSupplyConfig` |
 | `SimilarityConfig` | `backend` (bm25/embedding/blend), `embedding_model`, `alpha`, `bm25_k1`, `bm25_b`, `bm25_scoring` (child_query/symmetric_mean/symmetric_max) |
 | `NeedConfig` | `estimator` (uniform/reference_density/syntactic/surprisal/blend), `blend_weights`, `reference_density: ReferenceDensityConfig`, `syntactic: SyntacticConfig`, `surprisal: SurprisalConfig` |
+| `NeedSupplyConfig` | `composition` (**evidence**/product), `independence_half_length` (words at which absent dependency signals count as half the evidence of independence) |
 | `SupplyConfig` | `metric` (uniform/structural/similarity/inverted_similarity/surprisal/antecedent_coverage/complementarity/**composite**), `combine` (max/mean), `floor` (prior/none), `antecedent: AntecedentCoverageConfig`, `complementarity: ComplementarityConfig`, `structural_prior: StructuralPriorConfig`, `similarity: SimilarityConfig`, `surprisal: SurprisalConfig` |
 | `AntecedentCoverageConfig` | `pointers: ReferenceDensityConfig` (acronyms excluded by default), `idf_weighted`, `default_when_no_pointers` |
 | `ComplementarityConfig` | `idf_source` (document/corpus), `top_k_novel_terms`, `stem_terms`, `min_idf` |
-| `StructuralPriorConfig` | `priors` (per supply relation; defaults measured), `default`, `enabled` |
+| `StructuralPriorConfig` | `priors` (per supply relation; defaults measured), `default`, `enabled`. Only the `product` composition applies them |
 | `ReferenceDensityConfig` | `language` (de/en/auto), `pointer_classes` (anaphor/demonstrative/definite/acronym), `default_when_no_pointers`, `use_spacy`, `spacy_model_de`, `spacy_model_en` |
 | `SyntacticConfig` | `feature_weights` (no_finite_verb/fragment/leading_connective/lowercase_start/parent_ends_in_colon), `language`, `use_spacy`, `spacy_model_de`, `spacy_model_en` |
 | `SurprisalConfig` | `model`, `counterfactual` (none/sibling_parent), `max_context_tokens`, `max_child_tokens`, `normalize` (max/logistic), `logistic_scale`, `device` |

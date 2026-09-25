@@ -35,6 +35,17 @@ turning a graph into retrievable units.
 
 ### Added
 
+- **`need_supply` composes by evidence, with no per-relation priors** (`NeedSupplyConfig`,
+  `composition="evidence"`, the default). Every edge starts at a neutral 0.5 for existing;
+  `need x measured supply` moves it toward 1 and `(1 - need) x n / (n + half_length)`
+  moves it toward 0. The product form could only trim: 80.5% of edges were floor-bound,
+  and a prior-floored supply scales a weight by at most 2.5x. On the 22-document test
+  corpus the evidence weights take 3970 distinct values with none at zero (product: 1133,
+  206 zeros), and calibrate to the midpoint budget exactly (product: -3.1%).
+  `composition="product"` restores the earlier weights. `evidence_components()` reports
+  every term per edge, and `scripts/audit_edge_weights.py --section evidence` breaks them
+  down by relation.
+
 - **`graph_from_docling(docling_doc, pdf_doc, filename, ...)`** and
   `build_snippet_graph(...)`: construction from an already-parsed document, with no
   corpus directory and nothing written to disk. An ablation over `PipelineFlags` or

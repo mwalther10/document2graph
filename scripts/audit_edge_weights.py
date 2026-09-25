@@ -12,10 +12,14 @@ have to be settled before any retrieval run is worth doing:
                  what produced the score. A relation whose edges are nearly all
                  floor-bound has no measurement behind it, and reporting its mean
                  as one would be a mistake.
-3. **agreement** rank correlation between metrics. If `need_supply` orders edges
+3. **evidence**  per supply relation, under the default ``"evidence"``
+                 composition: how many edges evidence pushes toward merging, how
+                 many it leaves at the neutral 0.5, and how many it pushes toward
+                 independence -- and which term did the pushing.
+4. **agreement** rank correlation between metrics. If `need_supply` orders edges
                  the way `structural` already did, every downstream condition is
                  measuring the same thing twice and the retrieval run is moot.
-4. **merge**     what each metric costs in index tokens once it is actually used
+5. **merge**     what each metric costs in index tokens once it is actually used
                  to merge, against the merge-everything baseline it has to beat.
 
 **This cannot produce new priors.** The shipped ones come from hand labels --
@@ -28,6 +32,7 @@ circular. What this shows is whether the priors are *doing work* and whether the
 Usage:
     uv run python scripts/audit_edge_weights.py
     uv run python scripts/audit_edge_weights.py --section priors
+    uv run python scripts/audit_edge_weights.py --section evidence
     uv run python scripts/audit_edge_weights.py --language de
     uv run python scripts/audit_edge_weights.py --graphs 'tests/.test-data/graphs/*.json'
 """
@@ -50,6 +55,7 @@ from document2graph.edge_weights import (
     components,
     compute_edge_weights,
     edge_context_from_graph,
+    evidence_components,
     supply_relation,
 )
 from document2graph.edge_weights import linguistic as ling
@@ -58,6 +64,7 @@ from document2graph.models import (
     EdgeWeightConfig,
     MergePolicy,
     NeedConfig,
+    NeedSupplyConfig,
     SimilarityConfig,
     SupplyConfig,
 )
@@ -83,6 +90,10 @@ def build_configs(backend: str) -> dict[str, EdgeWeightConfig]:
             metric="need_supply", supply=supply, need=NeedConfig(estimator="syntactic")),
         "ns/blend": EdgeWeightConfig(
             metric="need_supply", supply=supply, need=NeedConfig(estimator="blend")),
+        # the older need * prior-floored supply, for comparison with runs made under it
+        "ns/blend/product": EdgeWeightConfig(
+            metric="need_supply", supply=supply, need=NeedConfig(estimator="blend"),
+            need_supply=NeedSupplyConfig(composition="product")),
     }
 
 
@@ -198,6 +209,55 @@ def section_priors(graphs, languages, backend: str) -> None:
     print("  flooring a proxy at a prior derived from that same proxy would be circular.")
 
 
+def section_evidence(graphs, backend: str, estimator: str, half_length: float) -> None:
+    print(f"\n=== evidence: which way does each relation move? (need={estimator}) ===\n")
+    config = EdgeWeightConfig(
+        metric="need_supply",
+        need=NeedConfig(estimator=estimator),
+        supply=SupplyConfig(similarity=SimilarityConfig(backend=backend)),
+        need_supply=NeedSupplyConfig(independence_half_length=half_length),
+    )
+    # a weight within this of 0.5 is reported as neutral: evidence too weak to act on
+    band = 0.05
+
+    rows = defaultdict(lambda: defaultdict(list))
+    for graph in graphs:
+        ctx = edge_context_from_graph(graph)
+        for edge, part in evidence_components(ctx, config).items():
+            row = rows[supply_relation(ctx, edge)]
+            for key, value in part.items():
+                row[key].append(value)
+
+    print(f"{'relation':<22} {'n':>6} {'need':>6} {'supply':>7} {'merge':>6} {'indep':>6} "
+          f"{'weight':>7} {'toward 1':>9} {'neutral':>8} {'toward 0':>9}")
+    for relation in (*SUPPLY_RELATIONS, "all"):
+        if relation == "all":
+            row = defaultdict(list)
+            for other in rows.values():
+                for key, values in other.items():
+                    row[key].extend(values)
+        else:
+            row = rows.get(relation)
+        if not row or not row["weight"]:
+            continue
+        weights = row["weight"]
+        n = len(weights)
+        up = sum(1 for w in weights if w > 0.5 + band)
+        down = sum(1 for w in weights if w < 0.5 - band)
+        print(f"{relation:<22} {n:>6} {st.mean(row['need']):>6.2f} {st.mean(row['supply']):>7.2f} "
+              f"{st.mean(row['merge_evidence']):>6.2f} "
+              f"{st.mean(row['independence_evidence']):>6.2f} {st.mean(weights):>7.2f} "
+              f"{100 * up / n:>8.1f}% {100 * (n - up - down) / n:>7.1f}% {100 * down / n:>8.1f}%")
+
+    print(f"\n  merge / indep   mean merge_evidence (need x measured supply) and")
+    print(f"                  independence_evidence ((1 - need) x confidence)")
+    print(f"  toward 1 / 0    share of edges evidence moved more than {band} from 0.5;")
+    print(f"                  neutral is the edge existing, with nothing measured either way")
+    print("\n  A relation that is almost all 'toward 0' is one whose children read on their")
+    print("  own; almost all 'neutral' means the measures cannot see into it, which is a")
+    print("  gap in the estimators rather than a finding about the documents.")
+
+
 def section_agreement(graphs, configs) -> None:
     print("\n=== agreement: do the metrics order edges differently? ===\n")
     per_metric = defaultdict(list)
@@ -266,13 +326,18 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--graphs", default=GRAPHS, help=f"glob of saved graphs (default: {GRAPHS})")
     parser.add_argument("--section", nargs="*",
-                        choices=["corpus", "priors", "agreement", "merge"],
-                        default=["corpus", "priors", "agreement", "merge"])
+                        choices=["corpus", "priors", "evidence", "agreement", "merge"],
+                        default=["corpus", "priors", "evidence", "agreement", "merge"])
     parser.add_argument("--language", default=None, choices=["de", "en"],
                         help="restrict to documents detected as this language")
     parser.add_argument("--backend", default="bm25", choices=["bm25", "embedding", "blend"],
                         help="similarity backend (default: bm25, needs no model download)")
     parser.add_argument("--metrics", nargs="*", default=None, help="subset of metrics")
+    parser.add_argument("--need", default="blend",
+                        choices=["reference_density", "syntactic", "blend"],
+                        help="need estimator for the evidence section (default: blend)")
+    parser.add_argument("--half-length", type=float, default=20.0,
+                        help="NeedSupplyConfig.independence_half_length for the evidence section")
     args = parser.parse_args()
 
     paths = sorted(glob.glob(args.graphs))
@@ -304,6 +369,8 @@ def main() -> None:
         section_corpus(graphs, languages)
     if "priors" in args.section:
         section_priors(graphs, languages, args.backend)
+    if "evidence" in args.section:
+        section_evidence(graphs, args.backend, args.need, args.half_length)
     if "agreement" in args.section:
         section_agreement(graphs, configs)
     if "merge" in args.section:
