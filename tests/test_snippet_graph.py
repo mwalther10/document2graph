@@ -1,12 +1,23 @@
+from collections import OrderedDict
 from types import SimpleNamespace
 
 import networkx as nx
 import pytest
 from docling_core.types.doc.base import BoundingBox, CoordOrigin
-from docling_core.types.doc.document import ListItem, ProvenanceItem, RefItem, TextItem
+from docling_core.types.doc.page import BoundingRectangle, TextCell, TextCellUnit
+from docling_core.types.doc.document import (
+    ListItem,
+    ProvenanceItem,
+    RefItem,
+    TableCell,
+    TableData,
+    TableItem,
+    TextItem,
+)
 
 from document2graph.document2graph_extractor.snippet_graph_constructor import (
     CAPTION_PATTERN,
+    PAGE_CELL_CACHE_PAGES,
     ROOT_NODE_ID,
     SnippetGraphConstructor,
 )
@@ -16,6 +27,8 @@ from document2graph.models import (
     EdgeWeightConfig,
     ImageSnippetNode,
     MetadataExtractionConfig,
+    PipelineFlags,
+    Provenance,
     TextSnippet,
     TextSnippetNode,
 )
@@ -25,7 +38,7 @@ PAGE_WIDTH, PAGE_HEIGHT = 600.0, 800.0
 SIDEBAR_BOX = (310.0, 560.0, 100.0, 280.0)
 
 
-def make_text_node(idx: int, level: int, level_label: str, parent_id: str | None, is_grouped: bool = False, region: str = "body", group_ref: str = "#/body") -> TextSnippetNode:
+def make_text_node(idx: int, level: int, level_label: str, parent_id: str | None, is_grouped: bool = False, region: str = "body", group_ref: str = "#/body", top: float = 1.0, left: float = 50.0, page_no: int = 1) -> TextSnippetNode:
     return TextSnippetNode(
         snippet_id=f"#/texts/{idx}",
         document_id="doc-1",
@@ -39,9 +52,9 @@ def make_text_node(idx: int, level: int, level_label: str, parent_id: str | None
         is_grouped=is_grouped,
         region=region,
         text=f"text {idx}",
-        bbox=BoundingBox(l=0, t=1, r=1, b=0),
+        bbox=BoundingBox(l=left, t=top, r=left + 200, b=top - 10, coord_origin=CoordOrigin.BOTTOMLEFT),
         charspan=(0, 6),
-        page_no=1,
+        page_no=page_no,
     )
 
 
@@ -96,7 +109,7 @@ def paged_constructor() -> SnippetGraphConstructor:
     return c
 
 
-def make_image_node(idx: int, level_label: str, parent_id: str) -> ImageSnippetNode:
+def make_image_node(idx: int, level_label: str, parent_id: str | None, caption_text: str = "a caption", top: float = 1.0, left: float = 50.0, page_no: int = 1) -> ImageSnippetNode:
     return ImageSnippetNode(
         snippet_id=f"#/pictures/{idx}",
         document_id="doc-1",
@@ -107,18 +120,22 @@ def make_image_node(idx: int, level_label: str, parent_id: str) -> ImageSnippetN
         parent_id=parent_id,
         docling_parent_ref=None,
         docling_self_ref=None,
-        caption_text="a caption",
-        bbox=BoundingBox(l=0, t=1, r=1, b=0),
-        page_no=1,
+        caption_text=caption_text,
+        bbox=BoundingBox(l=left, t=top, r=left + 200, b=top - 10, coord_origin=CoordOrigin.BOTTOMLEFT),
+        page_no=page_no,
     )
 
 
 @pytest.fixture
 def constructor() -> SnippetGraphConstructor:
-    # bypass __init__: these methods only need edge_weights and document metadata
+    # bypass __init__: these methods only need edge_weights, document metadata and
+    # the relation map the edge builders record into
     c = SnippetGraphConstructor.__new__(SnippetGraphConstructor)
     c.edge_weights = EdgeWeightConfig()
+    c._edge_relations = {}
     c._document_metadata = Document(document_id="doc-1", title="Test Doc")
+    c.flags = PipelineFlags()
+    c.logger = Log("test").logger
     return c
 
 
@@ -136,6 +153,50 @@ def test_edge_weights_by_category(constructor: SnippetGraphConstructor):
     assert constructor.compute_edge_weight(body, bullet) == weights.list_item
     assert constructor.compute_edge_weight(body, image) == weights.media
     assert constructor.compute_edge_weight(heading, orphan_image) == weights.unreferenced_media
+
+
+def test_edge_relations_by_category(constructor: SnippetGraphConstructor):
+    heading = make_text_node(0, level=0, level_label="Heading", parent_id=None)
+    subheading = make_text_node(1, level=1, level_label="Heading", parent_id=heading.snippet_id)
+    body = make_text_node(2, level=2, level_label="Body", parent_id=subheading.snippet_id)
+    bullet = make_text_node(3, level=2, level_label="Body", parent_id=body.snippet_id, is_grouped=True)
+    image = make_image_node(0, level_label="Body", parent_id=body.snippet_id)
+    orphan_image = make_image_node(1, level_label="Unreferenced Image", parent_id=heading.snippet_id)
+
+    assert constructor.edge_relation(heading, subheading) == "section"
+    assert constructor.edge_relation(subheading, body) == "text"
+    assert constructor.edge_relation(body, bullet) == "list_item"
+    assert constructor.edge_relation(body, image) == "media"
+    assert constructor.edge_relation(heading, orphan_image) == "unreferenced_media"
+
+
+def test_constructing_edges_records_their_relation(constructor: SnippetGraphConstructor):
+    heading = make_text_node(0, level=0, level_label="Heading", parent_id=None)
+    bullet = make_text_node(1, level=1, level_label="Body", parent_id=heading.snippet_id,
+                            is_grouped=True)
+    orphan = make_text_node(2, level=1, level_label="Body", parent_id="#/texts/999")
+
+    constructor.construct_snippet_edges([heading, bullet, orphan], heading.snippet_id)
+
+    assert constructor._edge_relations[(heading.snippet_id, bullet.snippet_id)] == "list_item"
+    # a dangling parent_id attaches to the root, and says so
+    assert constructor._edge_relations[(heading.snippet_id, orphan.snippet_id)] == "root"
+
+
+def test_edge_context_carries_relations_and_unit_kinds(constructor: SnippetGraphConstructor):
+    heading = make_text_node(0, level=0, level_label="Heading", parent_id=None)
+    bullet = make_text_node(1, level=1, level_label="Body", parent_id=heading.snippet_id,
+                            is_grouped=True)
+    image = make_image_node(0, level_label="Body", parent_id=heading.snippet_id)
+    nodes = [heading, bullet, image]
+    edges = constructor.construct_snippet_edges(nodes, heading.snippet_id)
+
+    ctx = constructor.build_edge_context(nodes, heading.snippet_id, [(p, c) for p, c, _ in edges])
+
+    assert ctx.relation((heading.snippet_id, bullet.snippet_id)) == "list_item"
+    assert ctx.unit(bullet.snippet_id).is_grouped
+    assert ctx.unit(image.snippet_id).kind == "image"
+    assert ctx.text(bullet.snippet_id) == bullet.text
 
 
 def test_custom_edge_weights_are_used(constructor: SnippetGraphConstructor):
@@ -289,6 +350,55 @@ def test_front_matter_and_figures_outrank_the_box_test(paged_constructor: Snippe
     assert regions == {"#/texts/0": "figure", "#/texts/1": "front_matter"}
 
 
+def test_page_background_rectangle_is_not_a_sidebar(paged_constructor: SnippetGraphConstructor):
+    """Word processors draw a rectangle the size of the page under every page. Read as a
+    box it puts the whole document inside a sidebar, leaving no body text to rank the
+    headings into an outline."""
+    paged_constructor._page_shapes_cache = {}
+    paged_constructor.pdf_doc = SimpleNamespace(
+        get_page=lambda page_no: make_page(
+            760.0, 700.0, 300.0, boxes=((0.0, PAGE_WIDTH, 0.0, PAGE_HEIGHT), SIDEBAR_BOX)
+        )
+    )
+    boxed = make_snippet(0, top=250.0, left=320.0, text="EMPFEHLUNGEN")
+    beside = make_snippet(1, top=250.0, left=50.0, text="Therapie")
+
+    assert paged_constructor.page_boxes(1) == [SIDEBAR_BOX]
+    regions = {s.text_item.self_ref: s.region for s in paged_constructor.assign_regions([boxed, beside])}
+    assert regions == {"#/texts/0": "sidebar", "#/texts/1": "body"}
+
+
+def test_unreferenced_media_attaches_to_the_closest_heading_above_it(paged_constructor: SnippetGraphConstructor):
+    """A table whose caption references nothing belongs to the section it is printed in.
+    Media nodes are numbered within the media list, so the heading above them has to be
+    found by position on the page, not by sequence_no."""
+    paged_constructor.levels = SimpleNamespace(header_levels=lambda: {0, 1})
+    title = make_text_node(0, level=0, level_label="Title", parent_id=None, top=760.0)
+    early = make_text_node(1, level=1, level_label="Heading", parent_id=title.snippet_id, top=280.0)
+    closest = make_text_node(2, level=1, level_label="Heading", parent_id=title.snippet_id, top=200.0)
+    below = make_text_node(3, level=1, level_label="Heading", parent_id=title.snippet_id, top=100.0)
+    table = make_image_node(0, level_label="", parent_id=None, caption_text="", top=150.0)
+
+    [placed] = paged_constructor.rb_image_parent_matching([table], [title, early, closest, below])
+
+    assert placed.parent_id == closest.snippet_id
+    assert placed.level == closest.level + 1
+    assert placed.level_label == "Unreferenced Image"
+
+
+def test_unreferenced_media_skips_aside_headings(paged_constructor: SnippetGraphConstructor):
+    """A figure label or the title of a sidebar box heads no section, so a table printed
+    past one still belongs to the body section around it."""
+    paged_constructor.levels = SimpleNamespace(header_levels=lambda: {0, 1, 2})
+    section = make_text_node(0, level=1, level_label="Heading", parent_id=None, top=280.0)
+    box_title = make_text_node(1, level=2, level_label="Heading", parent_id=None, top=200.0, region="sidebar")
+    table = make_image_node(0, level_label="", parent_id=None, caption_text="", top=150.0)
+
+    [placed] = paged_constructor.rb_image_parent_matching([table], [section, box_title])
+
+    assert placed.parent_id == section.snippet_id
+
+
 def test_sidebars_hang_off_the_section_they_sit_in(constructor: SnippetGraphConstructor):
     """An aside belongs to the section it is printed in, but never holds one."""
     section = make_text_node(0, level=1, level_label="Heading", parent_id=None)
@@ -382,3 +492,487 @@ def test_graph_is_connected(constructor: SnippetGraphConstructor):
     # the cycle is attached via its structurally highest node
     assert graph.has_edge(ROOT_NODE_ID, cycle_a.snippet_id)
     assert all("weight" in data for _, _, data in graph.edges(data=True))
+
+
+def flagged_constructor(paged: SnippetGraphConstructor, **flags) -> SnippetGraphConstructor:
+    """The paged constructor with the ablation flags set and the per-snippet
+    typography lookups stubbed out (they need a real parsed page)."""
+    paged.flags = PipelineFlags(**flags)
+    paged.add_line_heights = lambda item: [10.0]
+    paged.get_font_key = lambda item: "F1"
+    return paged
+
+
+def make_docling_doc(*snippets: TextSnippet) -> SimpleNamespace:
+    # `pages` mirrors DoclingDocument's own: page_no -> item carrying the page
+    # box. It is what page_geometry() reads, so a fake without it would make
+    # get_graph() fail on the double rather than on anything under test.
+    pages = {
+        page_no: SimpleNamespace(
+            page_no=page_no, size=SimpleNamespace(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+        )
+        for page_no in sorted({s.text_item.prov[0].page_no for s in snippets} or {1})
+    }
+    return SimpleNamespace(
+        texts=[s.text_item for s in snippets], tables=[], pictures=[], pages=pages
+    )
+
+
+def test_stitching_flag_off_leaves_the_column_fragments_apart(paged_constructor: SnippetGraphConstructor):
+    head = make_snippet(0, top=340.0, left=50.0, text="können in der ambulanten und")
+    tail = make_snippet(1, top=690.0, left=320.0, text="stationären Pflege eingesetzt werden.")
+    doc = make_docling_doc(head, tail)
+
+    on = flagged_constructor(paged_constructor, stitch_continuations=True)._prepare_text_items(doc)
+    assert len(on) == 1
+
+    off = flagged_constructor(paged_constructor, stitch_continuations=False)._prepare_text_items(doc)
+    assert len(off) == 2
+    assert [s.text_item.text for s in off] == [head.text_item.text, tail.text_item.text]
+
+
+def test_reading_order_flag_off_keeps_doclings_order(paged_constructor: SnippetGraphConstructor):
+    """docling reads the page column by column, so the left column's body text arrives
+    before the right column's continuation of the block above it. The repair puts the
+    blocks back in order; turning it off leaves docling's order alone."""
+    left_body = make_snippet(0, top=250.0, left=50.0, text="Linke Spalte, unterer Block.")
+    right_front = make_snippet(1, top=600.0, left=320.0, text="Rechte Spalte, oberer Block.")
+    doc = make_docling_doc(left_body, right_front)
+
+    on = flagged_constructor(paged_constructor, repair_reading_order=True, stitch_continuations=False,
+                             assign_regions=False)._prepare_text_items(doc)
+    assert [s.text_item.self_ref for s in on] == ["#/texts/1", "#/texts/0"]
+
+    off = flagged_constructor(paged_constructor, repair_reading_order=False, stitch_continuations=False,
+                              assign_regions=False)._prepare_text_items(doc)
+    assert [s.text_item.self_ref for s in off] == ["#/texts/0", "#/texts/1"]
+
+
+def test_region_flag_off_leaves_everything_in_the_body(paged_constructor: SnippetGraphConstructor):
+    """With regions off the masthead and a boxed sidebar are ordinary body text, so
+    they take part in the document outline."""
+    masthead = make_snippet(0, top=650.0, left=50.0, text="Deutsche Gesellschaft")
+    boxed = make_snippet(1, top=250.0, left=320.0, text="EMPFEHLUNGEN")
+    doc = make_docling_doc(masthead, boxed)
+
+    on = flagged_constructor(paged_constructor, assign_regions=True,
+                             stitch_continuations=False)._prepare_text_items(doc)
+    assert {s.region for s in on} == {"front_matter", "sidebar"}
+
+    off = flagged_constructor(paged_constructor, assign_regions=False,
+                              stitch_continuations=False)._prepare_text_items(doc)
+    assert {s.region for s in off} == {"body"}
+
+
+# --------------------------------------------------------- line fragment merging
+
+def sidebar_snippet(idx: int, top: float, text: str, left: float = 320.0) -> TextSnippet:
+    """A fragment inside the drawn sidebar box of the paged fixture."""
+    return make_snippet(idx, top=top, left=left, text=text).model_copy(update={"region": "sidebar"})
+
+
+def test_lines_of_one_sidebar_block_are_merged(paged_constructor: SnippetGraphConstructor):
+    """docling reads a boxed sidebar line by line, so one bullet arrives as three
+    snippets, each cut mid-sentence."""
+    lines = [
+        sidebar_snippet(0, top=250.0, text="nach 8 bis 12 Stunden Nahrungs-, Nikotin-"),
+        sidebar_snippet(1, top=238.0, text="und Alkoholkarenz, im Sitzen oder Liegen,"),
+        sidebar_snippet(2, top=226.0, text="ohne Muskelanstrengung."),
+    ]
+
+    merged = paged_constructor.merge_line_fragments(lines)
+
+    assert len(merged) == 1
+    assert merged[0].text_item.text == (
+        "nach 8 bis 12 Stunden Nahrungs-, Nikotin- und Alkoholkarenz, "
+        "im Sitzen oder Liegen, ohne Muskelanstrengung."
+    )
+    assert [p.page_no for p in merged[0].text_item.prov] == [1, 1, 1]
+
+
+def test_body_text_is_never_line_merged(paged_constructor: SnippetGraphConstructor):
+    """Two bullets of an enumeration both end on a comma and sit one line apart. In the
+    body docling's own clustering is right, so they stay two list items."""
+    first = make_snippet(0, top=250.0, left=50.0, label="list_item",
+                         text="SIDD (schwerer insulindefizienter Diabetes),")
+    second = make_snippet(1, top=238.0, left=50.0, label="list_item",
+                          text="SIRD (schwerer insulinresistenter Diabetes),")
+
+    assert len(paged_constructor.merge_line_fragments([first, second])) == 2
+
+
+def test_fragments_a_paragraph_apart_are_left_alone(paged_constructor: SnippetGraphConstructor):
+    """Twelve points below is a new block, not the next line of this one."""
+    head = sidebar_snippet(0, top=250.0, text="Neuerung 1: Einzelne Aktualisierungen,")
+    far = sidebar_snippet(1, top=225.0, text="Begründung: neue Eigenschaften der Systeme.")
+
+    assert len(paged_constructor.merge_line_fragments([head, far])) == 2
+
+
+def test_side_by_side_fragments_are_left_alone(paged_constructor: SnippetGraphConstructor):
+    """Two labels printed beside each other in a figure are vertically adjacent but
+    share no horizontal extent, so they are not one running text."""
+    left = sidebar_snippet(0, top=250.0, text="Grenzen der Betriebs-", left=320.0)
+    right = sidebar_snippet(1, top=240.0, text="bedingungen beachten", left=530.0)
+
+    assert len(paged_constructor.merge_line_fragments([left, right])) == 2
+
+
+def test_line_merging_flag_off_leaves_the_fragments_apart(paged_constructor: SnippetGraphConstructor):
+    boxed = [make_snippet(0, top=250.0, left=320.0, text="nach 8 bis 12 Stunden Nahrungs-,"),
+             make_snippet(1, top=238.0, left=320.0, text="Nikotin- und Alkoholkarenz.")]
+    doc = make_docling_doc(*boxed)
+
+    on = flagged_constructor(paged_constructor, stitch_continuations=False,
+                             merge_line_fragments=True)._prepare_text_items(doc)
+    assert len(on) == 1
+
+    off = flagged_constructor(paged_constructor, stitch_continuations=False,
+                              merge_line_fragments=False)._prepare_text_items(doc)
+    assert len(off) == 2
+
+
+# ------------------------------------------------------ table continuation merging
+
+def make_table(idx: int, rows: list[list[str]], page_no: int, top: float, bottom: float,
+               left: float = 50.0, right: float = 550.0, header: bool = True) -> TableItem:
+    """A table item as docling reports it, laid out on a page."""
+    cells = [
+        TableCell(
+            text=text, row_span=1, col_span=1,
+            start_row_offset_idx=r, end_row_offset_idx=r + 1,
+            start_col_offset_idx=c, end_col_offset_idx=c + 1,
+            column_header=header and r == 0,
+        )
+        for r, row in enumerate(rows) for c, text in enumerate(row)
+    ]
+    return TableItem(
+        self_ref=f"#/tables/{idx}", label="table",
+        data=TableData(table_cells=cells, num_rows=len(rows), num_cols=len(rows[0])),
+        prov=[ProvenanceItem(
+            page_no=page_no, charspan=(0, 0),
+            bbox=BoundingBox(l=left, t=top, r=right, b=bottom, coord_origin=CoordOrigin.BOTTOMLEFT),
+        )],
+    )
+
+
+def test_table_continued_on_the_next_page_is_merged(paged_constructor: SnippetGraphConstructor):
+    """The Teststreifenbedarf table runs off the bottom of one page and resumes at the
+    top of the next, repeating its row labels."""
+    head = make_table(0, [["Teststreifenbedarf", ">4 taglich"], ["Messintervall", "taglich"]],
+                      page_no=1, top=730.0, bottom=60.0)
+    tail = make_table(1, [["Teststreifenbedarf", ">2 taglich"], ["Messintervall", "woechentlich"]],
+                      page_no=2, top=730.0, bottom=400.0)
+
+    merged = paged_constructor.merge_table_continuations([head, tail])
+
+    assert len(merged) == 1
+    assert merged[0].self_ref == "#/tables/0"
+    assert merged[0].data.num_rows == 4
+    assert [p.page_no for p in merged[0].prov] == [1, 2]
+    assert paged_constructor._table_continuations == {"#/tables/0": ["#/tables/1"]}
+
+
+def test_merged_table_keeps_both_halves_in_its_grid(paged_constructor: SnippetGraphConstructor):
+    head = make_table(0, [["AID", "Automated Insulin Delivery"], ["CGM", "Continuous Glucose Monitoring"]],
+                      page_no=1, top=730.0, bottom=60.0, header=False)
+    tail = make_table(1, [["IQWiG", "Institut fuer Qualitaet"], ["ISF", "Insulinsensitivitaetsfaktor"]],
+                      page_no=2, top=730.0, bottom=400.0, header=False)
+
+    merged = paged_constructor.merge_table_continuations([head, tail])[0]
+
+    assert [row[0].text for row in merged.data.grid] == ["AID", "CGM", "IQWiG", "ISF"]
+    # the continuation's rows never become a second header
+    assert not any(cell.column_header for row in merged.data.grid[2:] for cell in row)
+
+
+def test_sibling_boxes_sharing_a_header_are_not_merged(paged_constructor: SnippetGraphConstructor):
+    """Every recommendation of the guideline layout is its own two-row table headed
+    "Empfehlungen". A repeated header row alone must not join them."""
+    first = make_table(0, [["Empfehlungen", "Empfehlungsgrad"], ["Ein individueller Zielwert ...", "A"]],
+                       page_no=1, top=300.0, bottom=60.0)
+    second = make_table(1, [["Empfehlungen", "Empfehlungsgrad"], ["Die Therapie soll ...", "B"]],
+                        page_no=2, top=730.0, bottom=600.0)
+
+    assert len(paged_constructor.merge_table_continuations([first, second])) == 2
+
+
+def test_table_continued_across_a_column_break_is_not_merged(paged_constructor: SnippetGraphConstructor):
+    """Only page breaks: two tables in the two columns of one page are two tables."""
+    left = make_table(0, [["Name", "Wert"], ["a", "1"]], page_no=1, top=300.0, bottom=60.0,
+                      left=50.0, right=290.0)
+    right = make_table(1, [["Name", "Wert"], ["b", "2"]], page_no=1, top=730.0, bottom=500.0,
+                       left=310.0, right=550.0)
+
+    assert len(paged_constructor.merge_table_continuations([left, right])) == 2
+
+
+def test_table_ending_high_on_its_page_is_not_a_continuation(paged_constructor: SnippetGraphConstructor):
+    """A table that finishes in the upper half of its page was not cut by the page end."""
+    head = make_table(0, [["Name", "Wert"], ["a", "1"]], page_no=1, top=730.0, bottom=600.0)
+    next_page = make_table(1, [["Name", "Wert"], ["b", "2"]], page_no=2, top=730.0, bottom=400.0)
+
+    assert len(paged_constructor.merge_table_continuations([head, next_page])) == 2
+
+
+def test_merging_twice_does_not_accumulate_continuation_refs(paged_constructor: SnippetGraphConstructor):
+    head = make_table(0, [["Teststreifenbedarf", ">4"], ["Messintervall", "taglich"]],
+                      page_no=1, top=730.0, bottom=60.0)
+    tail = make_table(1, [["Teststreifenbedarf", ">2"], ["Messintervall", "woechentlich"]],
+                      page_no=2, top=730.0, bottom=400.0)
+
+    assert len(paged_constructor.merge_table_continuations([head, tail])) == 1
+    assert paged_constructor._table_continuations == {"#/tables/0": ["#/tables/1"]}
+
+    # a second run must not accumulate the refs of the first
+    assert len(paged_constructor.merge_table_continuations([head, tail])) == 1
+    assert paged_constructor._table_continuations == {"#/tables/0": ["#/tables/1"]}
+
+
+def test_an_address_closing_on_an_email_is_finished(paged_constructor: SnippetGraphConstructor):
+    """The masthead lists one correspondence entry per author, each ending on an
+    e-mail address. Ending on a lower case word, it would otherwise read as cut off
+    and swallow the next author."""
+    first = sidebar_snippet(0, top=250.0, text="Klinik Ostfildern, Deutschland a.zeyfang@medius-kliniken.de")
+    second = sidebar_snippet(1, top=238.0, text="PD Dr. med. Anke Bahrmann, Universitätsklinikum Heidelberg")
+
+    assert len(paged_constructor.merge_line_fragments([first, second])) == 2
+    assert len(paged_constructor.stitch_continuations([first, second])) == 2
+
+
+def test_page_geometry_reads_docling_page_sizes_in_page_order(
+    paged_constructor: SnippetGraphConstructor,
+):
+    """The page table comes off the parsed docling document, not off pdf_doc.
+
+    Both report the same numbers, but only the docling document survives in the
+    parse cache, so a graph rebuilt from the cache still carries its pages.
+    """
+    paged_constructor.docling_doc = SimpleNamespace(
+        pages={
+            2: SimpleNamespace(page_no=2, size=SimpleNamespace(width=595.0, height=842.0)),
+            1: SimpleNamespace(page_no=1, size=SimpleNamespace(width=595.0, height=842.0)),
+        }
+    )
+    pages = paged_constructor.page_geometry()
+    assert [p.page_no for p in pages] == [1, 2]
+    assert [(p.width, p.height) for p in pages] == [(595.0, 842.0), (595.0, 842.0)]
+
+
+def make_cell(text: str, bottom: float, top: float, left: float = 50.0, right: float = 250.0,
+              origin: CoordOrigin = CoordOrigin.BOTTOMLEFT) -> TextCell:
+    """One page cell, as a rectangle wound anticlockwise from its bottom-left corner."""
+    return TextCell(
+        rect=BoundingRectangle(
+            r_x0=left, r_y0=bottom, r_x1=right, r_y1=bottom,
+            r_x2=right, r_y2=top, r_x3=left, r_y3=top, coord_origin=origin,
+        ),
+        text=text, orig=text, from_ocr=False,
+    )
+
+
+class CountingPage(SimpleNamespace):
+    """A page that records how often its cells were read."""
+
+    def __init__(self, cells: list[TextCell]):
+        super().__init__(dimension=SimpleNamespace(width=PAGE_WIDTH, height=PAGE_HEIGHT))
+        self._cells = cells
+        self.reads = 0
+
+    def iterate_cells(self, cell_unit):
+        self.reads += 1
+        return list(self._cells)
+
+
+def make_cell_constructor(page: CountingPage) -> SnippetGraphConstructor:
+    c = SnippetGraphConstructor.__new__(SnippetGraphConstructor)
+    c._page_cells_cache = OrderedDict()
+    c.pdf_doc = SimpleNamespace(get_page=lambda page_no: page)
+    return c
+
+
+def test_cells_in_bbox_returns_only_the_cells_the_box_covers():
+    page = CountingPage([make_cell("inside", 100.0, 110.0), make_cell("elsewhere", 600.0, 610.0)])
+    c = make_cell_constructor(page)
+
+    box = BoundingBox(l=50.0, t=115.0, r=250.0, b=95.0, coord_origin=CoordOrigin.BOTTOMLEFT)
+    assert [cell.text for cell in c.cells_in_bbox(1, TextCellUnit.LINE, box)] == ["inside"]
+
+
+def test_cells_of_a_page_are_read_once_however_many_snippets_ask():
+    """The point of the cache. Reading per snippet made a copy of the whole page
+    per snippet, which was almost all of the time graph construction took."""
+    page = CountingPage([make_cell(f"line {i}", 100.0 + i * 20, 110.0 + i * 20) for i in range(5)])
+    c = make_cell_constructor(page)
+
+    for i in range(5):
+        box = BoundingBox(l=50.0, t=115.0 + i * 20, r=250.0, b=95.0 + i * 20,
+                          coord_origin=CoordOrigin.BOTTOMLEFT)
+        assert len(c.cells_in_bbox(1, TextCellUnit.LINE, box)) == 1
+    assert page.reads == 1
+
+
+def test_cells_are_converted_to_the_origin_of_the_query_box():
+    """A cell reported top-left has to be comparable with a bottom-left query box,
+    or every overlap test against docling provenance silently misses."""
+    page = CountingPage([make_cell("top-left", 683.0, 693.0, origin=CoordOrigin.TOPLEFT)])
+    c = make_cell_constructor(page)
+
+    # the same band of the page, counted from the bottom instead
+    box = BoundingBox(l=50.0, t=PAGE_HEIGHT - 683.0, r=250.0, b=PAGE_HEIGHT - 693.0,
+                      coord_origin=CoordOrigin.BOTTOMLEFT)
+    found = c.cells_in_bbox(1, TextCellUnit.LINE, box)
+    assert [cell.text for cell in found] == ["top-left"]
+    assert found[0].rect.coord_origin == CoordOrigin.BOTTOMLEFT
+
+
+def test_converting_a_cell_does_not_rewrite_the_page_it_came_from():
+    """Cells are handed out shared, so the conversion must copy rather than
+    mutate -- otherwise the first query rewrites the page for every later one."""
+    original = make_cell("top-left", 683.0, 693.0, origin=CoordOrigin.TOPLEFT)
+    c = make_cell_constructor(CountingPage([original]))
+
+    box = BoundingBox(l=50.0, t=PAGE_HEIGHT - 683.0, r=250.0, b=PAGE_HEIGHT - 693.0,
+                      coord_origin=CoordOrigin.BOTTOMLEFT)
+    c.cells_in_bbox(1, TextCellUnit.LINE, box)
+    assert original.rect.coord_origin == CoordOrigin.TOPLEFT
+    assert original.rect.r_y0 == 683.0
+
+
+def test_the_page_cell_cache_stays_bounded():
+    """The character cells of a 200-page report are not worth holding at once."""
+    page = CountingPage([make_cell("a", 100.0, 110.0)])
+    c = make_cell_constructor(page)
+    box = BoundingBox(l=50.0, t=115.0, r=250.0, b=95.0, coord_origin=CoordOrigin.BOTTOMLEFT)
+
+    for page_no in range(PAGE_CELL_CACHE_PAGES * 3):
+        c.cells_in_bbox(page_no, TextCellUnit.LINE, box)
+    assert len(c._page_cells_cache) == PAGE_CELL_CACHE_PAGES
+
+
+# --------------------------------------------------------------------------- #
+# absorbing a figure's own labels
+# --------------------------------------------------------------------------- #
+def make_figure_label(idx: int, picture: ImageSnippetNode, text: str) -> TextSnippetNode:
+    """One line read out of a chart: region "figure", parented on the picture."""
+    node = make_text_node(idx, level=3, level_label="Body", parent_id=picture.snippet_id,
+                          region="figure")
+    node.text = text
+    return node
+
+
+def test_a_pictures_labels_become_the_pictures_text(constructor: SnippetGraphConstructor):
+    """A bar chart arrives as one node per number. None of them is retrievable and
+    the picture holding them has no text at all, so the whole figure is invisible."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0", caption_text="Abb. 1")
+    labels = [make_figure_label(i, picture, text) for i, text in enumerate(["42", "33", "51"], 1)]
+
+    remaining = constructor.absorb_figure_text(labels, [picture])
+
+    assert remaining == []
+    assert picture.figure_text == "42 · 33 · 51"
+    assert picture.content_text() == "Abb. 1\n42 · 33 · 51"
+
+
+def test_absorbed_labels_read_in_the_order_the_page_has_them(constructor: SnippetGraphConstructor):
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    labels = [make_figure_label(i, picture, text) for i, text in enumerate(["erst", "dann"], 1)]
+
+    constructor.absorb_figure_text(list(reversed(labels)), [picture])
+
+    assert picture.figure_text == "erst · dann"
+
+
+def test_figure_prose_stays_a_node_of_its_own(constructor: SnippetGraphConstructor):
+    """A flowchart step reads on its own and is worth retrieving on its own; it is
+    still part of what the figure says, so it is in the digest as well."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    label = make_figure_label(1, picture, "42")
+    prose = make_figure_label(2, picture, "Bei einem HbA1c ueber acht Prozent wird die Therapie eskaliert.")
+
+    remaining = constructor.absorb_figure_text([label, prose], [picture])
+
+    assert [node.snippet_id for node in remaining] == [prose.snippet_id]
+    assert prose.text in picture.figure_text
+
+
+def test_a_caption_is_never_absorbed(constructor: SnippetGraphConstructor):
+    """It is already the media node's own field: absorbing it would print it twice."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0", caption_text="Abb. 1")
+    caption = make_figure_label(1, picture, "Abb. 1")
+    picture.caption_nodes = [caption]
+
+    remaining = constructor.absorb_figure_text([caption], [picture])
+
+    assert [node.snippet_id for node in remaining] == [caption.snippet_id]
+    # and it is out of the digest too, not merely left standing as a node: the
+    # picture already carries it as caption_text, so a caption in the figure region
+    # read twice over in everything built on content_text()
+    assert picture.figure_text == ""
+    assert picture.content_text() == "Abb. 1"
+
+
+def test_a_caption_does_not_read_twice_among_the_labels(constructor: SnippetGraphConstructor):
+    """The caption sits between the labels in reading order, which is how it got into
+    the digest while still, correctly, staying a node of its own."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0", caption_text="Abb. 1")
+    first = make_figure_label(1, picture, "42")
+    caption = make_figure_label(2, picture, "Abb. 1")
+    last = make_figure_label(3, picture, "33")
+    picture.caption_nodes = [caption]
+
+    remaining = constructor.absorb_figure_text([first, caption, last], [picture])
+
+    assert [node.snippet_id for node in remaining] == [caption.snippet_id]
+    assert picture.figure_text == "42 · 33"
+    assert picture.content_text() == "Abb. 1\n42 · 33"
+
+
+def test_a_figure_node_with_children_is_never_absorbed(constructor: SnippetGraphConstructor):
+    """Removing it would leave its children hanging off a node that is gone."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    parent = make_figure_label(1, picture, "Gruppe")
+    child = make_text_node(2, level=4, level_label="Body", parent_id=parent.snippet_id, region="figure")
+    child.text = "42"
+
+    remaining = constructor.absorb_figure_text([parent, child], [picture])
+
+    # "Gruppe" is short enough to absorb and sits right under the picture, and is kept
+    # anyway; the child hangs off it rather than off the picture and was never a
+    # candidate
+    assert [node.snippet_id for node in remaining] == [parent.snippet_id, child.snippet_id]
+
+
+def test_only_absorbed_labels_hand_over_their_geometry(constructor: SnippetGraphConstructor):
+    """A label that stays a node still reports its own box; the picture must not
+    report it too, or one region of the page is returned by two units."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    label = make_figure_label(1, picture, "42")
+    label.provenance = [Provenance(page_no=4, charspan=(0, 2))]
+    prose = make_figure_label(2, picture, "Bei einem HbA1c ueber acht Prozent wird eskaliert.")
+    prose.provenance = [Provenance(page_no=5, charspan=(0, 10))]
+
+    constructor.absorb_figure_text([label, prose], [picture])
+
+    assert [entry.page_no for entry in picture.provenance] == [4]
+
+
+def test_body_text_is_left_alone(constructor: SnippetGraphConstructor):
+    """The rule is about how a figure is read, not about how short a node is."""
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    body = make_text_node(1, level=3, level_label="Body", parent_id=picture.snippet_id)
+    body.text = "42"
+
+    remaining = constructor.absorb_figure_text([body], [picture])
+
+    assert [node.snippet_id for node in remaining] == [body.snippet_id]
+    assert picture.figure_text == ""
+
+
+def test_the_flag_off_leaves_every_node_where_it_was(constructor: SnippetGraphConstructor):
+    constructor.flags = PipelineFlags(absorb_figure_text=False)
+    picture = make_image_node(0, level_label="Body", parent_id="#/texts/0")
+    labels = [make_figure_label(i, picture, text) for i, text in enumerate(["42", "33"], 1)]
+
+    assert constructor.absorb_figure_text(labels, [picture]) == labels
+    assert picture.figure_text == ""

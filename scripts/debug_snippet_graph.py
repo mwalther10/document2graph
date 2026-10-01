@@ -8,12 +8,12 @@ Usage:
     uv run python scripts/debug_snippet_graph.py
     uv run python scripts/debug_snippet_graph.py --pdf tests/.test-pdf/<file>.pdf
     uv run python scripts/debug_snippet_graph.py --refresh          # force re-conversion
+    uv run python scripts/debug_snippet_graph.py --level-source docling
     uv run python scripts/debug_snippet_graph.py --log-level INFO   # less noise
 """
 
 import argparse
 import glob
-import logging
 import os
 import sys
 
@@ -28,37 +28,23 @@ from document2graph.document2graph_extractor.snippet_graph_constructor import (
     ROOT_NODE_ID,
     SnippetGraphConstructor,
 )
-from document2graph.models import MetadataExtractionConfig, MetadataFieldConfig
+from document2graph.models import MetadataExtractionConfig, MetadataFieldConfig, PipelineFlags
+from document2graph.utils.base_extractor import Extractor
 
 PDF_DIR = "tests/.test-pdf/"
 CACHE_DIR = "tests/.test-data/raw_texts/"
 
 
 def load_docling_doc(pdf_path: str, refresh: bool) -> DoclingDocument:
-    """Load the DoclingDocument from the json cache, converting the PDF only on a cache miss."""
-    clean_filename = os.path.splitext(os.path.basename(pdf_path))[0]
-    cache_file = os.path.join(CACHE_DIR, f"{clean_filename}_docling_doc.json")
-    if os.path.isfile(cache_file) and not refresh:
-        logging.getLogger("debug").info(f"Loading cached docling doc from {cache_file}")
-        return DoclingDocument.load_from_json(cache_file)
-
-    logging.getLogger("debug").info(f"No cache for {clean_filename}, running docling conversion (slow)...")
+    """Load the DoclingDocument through the package's docling cache."""
     from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
     from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.datamodel.base_models import InputFormat
 
     # force CPU: docling's layout model needs float64, which MPS does not support
     pipeline_options = PdfPipelineOptions(
         accelerator_options=AcceleratorOptions(device=AcceleratorDevice.CPU)
     )
-    converter = DocumentConverter(format_options={
-        InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-    })
-    doc = converter.convert(pdf_path).document
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    doc.save_as_json(cache_file)
-    return doc
+    return Extractor(pdf_path, pipeline_options, cache_dir=CACHE_DIR, refresh=refresh).doc
 
 
 def print_summary(constructor: SnippetGraphConstructor, graph) -> None:
@@ -136,6 +122,8 @@ def main() -> None:
     parser.add_argument("--refresh", action="store_true", help="ignore the docling json cache and re-convert")
     parser.add_argument("--log-level", default="DEBUG", help="log level for all loggers (default: DEBUG)")
     parser.add_argument("--save-gexf", default="", help="optionally write the graph to this .gexf path")
+    parser.add_argument("--level-source", default="hybrid", choices=["hybrid", "typography", "docling"],
+                        help="how heading levels are derived (default: hybrid)")
     args = parser.parse_args()
     if not args.pdf:
         parser.error(f"no PDF found in {PDF_DIR}, pass one with --pdf")
@@ -162,6 +150,7 @@ def main() -> None:
         filename=os.path.splitext(os.path.basename(args.pdf))[0],
         document_type="debug",
         metadata_config=metadata_config,
+        flags=PipelineFlags(level_source=args.level_source),
     )
     graph = constructor.get_graph(save_to=args.save_gexf)
     print_summary(constructor, graph)

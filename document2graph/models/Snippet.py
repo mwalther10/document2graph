@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from docling_core.types.doc.document import RefItem
 from docling_core.types.doc.base import BoundingBox
 
+from .Provenance import Provenance
 from .TextSnippet import REGION_BODY
 
 class Snippet(BaseModel):
@@ -18,6 +19,8 @@ class Snippet(BaseModel):
     region: str = REGION_BODY
     page_no: int
     bbox: BoundingBox
+    charspan: tuple[int, int] | None = None
+    provenance: list[Provenance] = []
     text: str
     docling_parent_ref: RefItem | None
     docling_self_ref: RefItem | None

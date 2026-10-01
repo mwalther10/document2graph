@@ -1,10 +1,9 @@
-import uuid
-
 from docling_core.types.doc.document import TextItem, SectionHeaderItem, RefItem
 
 from ..models.TextSnippet import TextSnippet
 from ..models.Document import Document
 from ..models.DocumentMetadata import DocumentMetadata, MetadataExtractionConfig
+from ..utils.ids import document_id_for
 from ..utils.log import Log
 
 
@@ -70,7 +69,7 @@ class DocumentMetadataExtractor:
         title = self.extract_title(title_page_snippets) if title_page_snippets else ""
 
         return Document(
-            document_id=str(uuid.uuid4()),
+            document_id=document_id_for(filename),
             title=title,
             document_type=document_type,
             filename=filename,

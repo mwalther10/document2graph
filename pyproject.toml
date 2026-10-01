@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "document2graph"
-version = "0.1.2"
+version = "0.2.0"
 description = "Extract hierarchical document graphs and baseline chunks from PDF"
 readme = "README.md"
 license = {text = "MIT"}
@@ -22,16 +22,15 @@ classifiers = [
     "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
-    "docling",
-    "docling-core",
-    "docling-parse",
+    "docling>=2.113",
+    "docling-core>=2.87",
+    "docling-parse>=7.8",
     "numpy",
     "pydantic>=2",
     "regex",
     "networkx",
     "coloredlogs",
     "tqdm",
-    "transformers",
 ]
 
 [project.urls]
@@ -39,8 +38,29 @@ Homepage = "https://github.com/mwalther10/document2graph"
 Issues = "https://github.com/mwalther10/document2graph/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+# Nothing below is needed to build a document graph, weight its edges structurally,
+# or run the rule-based need and supply measures. Those are layout plus lexical
+# statistics and make no model call.
+#
+# transformers and torch do arrive anyway today, because docling-core and
+# docling-ibm-models require them -- so these two extras are not what makes the
+# features work on a fresh install, they are a declaration that *this* package
+# imports them directly. Without it, a slimmer docling (docling-slim already
+# exists) would break surprisal with no signal that we ever depended on it.
+#
+# a Hugging Face tokenizer for merge_units(count_tokens=...), so that a token
+# budget is counted in the same currency the retriever will embed in
+tokenizers = ["transformers>=4.40"]
+# the surprisal need estimator: one forward pass of a small causal LM per edge
+surprisal = ["transformers>=4.40", "torch>=2"]
+# semantic similarity backends (SimilarityConfig.backend = "embedding" | "blend")
 embeddings = ["sentence-transformers"]
+# optional accuracy upgrade for the rule-based need estimators; without it they
+# fall back to regex lexicons, which are weaker on finite verbs and clause structure
+linguistic = ["spacy>=3.7"]
+neo4j = ["neo4j"]
+dev = ["pytest>=8", "python-dotenv", "neo4j"]
+all = ["document2graph[tokenizers,surprisal,embeddings,linguistic,neo4j]"]
 
 [tool.setuptools.packages.find]
 where = ["."]

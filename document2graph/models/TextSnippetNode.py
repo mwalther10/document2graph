@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from docling_core.types.doc.document import RefItem
 from docling_core.types.doc.base import BoundingBox
 
+from .Provenance import Provenance
 from .TextSnippet import REGION_BODY
 
 class TextSnippetNode(BaseModel):
@@ -19,6 +20,9 @@ class TextSnippetNode(BaseModel):
     bbox: BoundingBox
     charspan: tuple[int, int]
     page_no: int
+    # every location this node occupies in the PDF; bbox/charspan/page_no above are
+    # the first of them. A node stitched across a column or page break has several.
+    provenance: list[Provenance] = []
     line_heights: list[float] = []
     font_key: str | None = None
     level_height: float | None = None

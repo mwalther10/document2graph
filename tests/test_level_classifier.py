@@ -232,3 +232,76 @@ def test_title_level_is_reported_as_a_header_level():
     lc = LevelClassifier([title, section_one, *_bodies()], title="My Title")
 
     assert 0 in lc.header_levels()
+
+
+def docling_header(idx: int, text: str, level: int, height: float = 20.0,
+                   font: str | None = None, region: str = "body") -> TextSnippet:
+    """A section header carrying docling's own level."""
+    item = SectionHeaderItem(self_ref=f"#/texts/{idx}", orig=text, text=text, level=level)
+    return TextSnippet(text_item=item, line_heights=[height], font_key=font, region=region)
+
+
+def test_typography_source_loses_the_hierarchy_the_enclosure_recovers():
+    """In the guideline layout sections (10.9) and subsections (11.6) differ by less
+    than a real size step, so size alone cannot separate them and they come out as
+    siblings; the hybrid ranking reads the nesting and puts the sections above."""
+    doc = _guideline_headers()
+    items = [*doc["ordered"], *_bodies()]
+
+    hybrid = LevelClassifier(items, level_source="hybrid")
+    typography = LevelClassifier(items, level_source="typography")
+
+    assert hybrid.classify(doc["sections"][0])[0] < hybrid.classify(doc["subsections"][0])[0]
+    assert typography.classify(doc["sections"][0])[0] == typography.classify(doc["subsections"][0])[0]
+    # a real size step still separates the details below them
+    assert typography.classify(doc["subsubsections"][0])[0] > typography.classify(doc["sections"][0])[0]
+
+
+def test_typography_source_keeps_styles_of_the_same_size_as_siblings():
+    same_a = docling_header(1, "Erster Abschnitt", level=1, height=20.0, font="A")
+    same_b = docling_header(2, "Zweiter Abschnitt", level=2, height=20.0, font="B")
+    smaller = docling_header(3, "Unterabschnitt", level=3, height=14.0, font="A")
+
+    lc = LevelClassifier([same_a, same_b, smaller, *_bodies()], level_source="typography")
+
+    assert lc.classify(same_a)[0] == lc.classify(same_b)[0]
+    assert lc.classify(smaller)[0] > lc.classify(same_a)[0]
+
+
+def test_docling_source_takes_the_levels_from_docling():
+    """No fonts, no heights, no enclosure: whatever the layout model decided. The two
+    headers set in the same face land on different levels, which the style-based
+    ranking cannot do."""
+    title = docling_header(0, "My Title", level=1, height=30.0, font="A")
+    section = docling_header(1, "Section One", level=1, height=20.0, font="A")
+    subsection = docling_header(2, "Subsection", level=2, height=20.0, font="A")
+
+    lc = LevelClassifier([title, section, subsection, *_bodies()], title="My Title",
+                         level_source="docling")
+
+    assert lc.classify(title) == (0, "Title")
+    assert lc.classify(section) == (1, "Heading")
+    assert lc.classify(subsection) == (2, "Heading")
+    assert lc.header_levels() >= {0, 1, 2}
+
+
+def test_docling_source_starts_at_level_0_without_a_title():
+    section = docling_header(0, "Section One", level=1)
+    subsection = docling_header(1, "Subsection", level=2)
+
+    lc = LevelClassifier([section, subsection, *_bodies()], level_source="docling")
+
+    assert lc.classify(section)[0] == 0
+    assert lc.classify(subsection)[0] == 1
+
+
+def test_docling_source_still_places_asides_below_the_sections():
+    """Region beats docling's level: a boxed sidebar titled as a top-level header must
+    not hold the sections that follow it."""
+    section = docling_header(0, "Section One", level=1)
+    subsection = docling_header(1, "Subsection", level=2)
+    aside = docling_header(2, "EMPFEHLUNGEN", level=1, region="sidebar")
+
+    lc = LevelClassifier([section, subsection, aside, *_bodies()], level_source="docling")
+
+    assert lc.classify(aside)[0] > lc.classify(subsection)[0]
