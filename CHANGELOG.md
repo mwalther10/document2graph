@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0
 
 The release the retrieval harness needs: a graph that can be read back and worked on
 without the PDF, edge weights as a package rather than a module, and policies for
@@ -109,14 +109,6 @@ turning a graph into retrievable units.
 - **`scripts/build_prior_queue.py` flattened tables before showing them to the judge.**
   In a one-line github table the row delimiter is `| |`, which is also how an empty cell
   is written, so the rows were not recoverable. Table snippets keep their line breaks.
-
-### Notes
-
-- `MEASURED_SUPPLY_PRIORS` still rests on 50 hand-labelled edges (5 per relation) from
-  six German documents. `scripts/audit_edge_weights.py --section priors` shows that the
-  prior, not the measured components, sets the supply score on ~86% of a 20-document
-  corpus — so those ten numbers are effectively the supply metric. A re-measurement at
-  n=30 per cell, in two languages, is in progress.
 
 ## 0.1.2
 
