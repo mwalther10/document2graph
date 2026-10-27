@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.1
+
+A security release for the
+[emSign CA certificate incident](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576).
+No behaviour changes.
+
+### Security
+
+- **`certifi>=2026.10.19` is now a declared runtime dependency.** Older certifi bundles
+  still trust the compromised emSign intermediate CAs. certifi previously arrived only
+  transitively, at whatever version the resolver picked; the floor makes every install
+  of document2graph pull a fixed bundle. The lockfile pins 2026.10.23.
+
+### Added
+
+- **A `plot` extra** (`matplotlib>=3.11.2`, also in `all`) for the font-height histogram
+  debug plot, `get_height_hist(plot=True)`. matplotlib was imported there lazily
+  without being declared anywhere; it stays out of the runtime dependencies.
+
 ## 0.2.0
 
 The release the retrieval harness needs: a graph that can be read back and worked on

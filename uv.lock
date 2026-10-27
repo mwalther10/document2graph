@@ -800,7 +800,7 @@ standard = [
 
 [[package]]
 name = "document2graph"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
@@ -808,7 +808,6 @@ dependencies = [
     { name = "docling" },
     { name = "docling-core" },
     { name = "docling-parse" },
-    { name = "matplotlib" },
     { name = "networkx" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -819,6 +818,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "matplotlib" },
     { name = "neo4j" },
     { name = "sentence-transformers" },
     { name = "spacy" },
@@ -839,6 +839,9 @@ linguistic = [
 neo4j = [
     { name = "neo4j" },
 ]
+plot = [
+    { name = "matplotlib" },
+]
 surprisal = [
     { name = "torch" },
     { name = "transformers" },
@@ -854,8 +857,8 @@ requires-dist = [
     { name = "docling", specifier = ">=2.113" },
     { name = "docling-core", specifier = ">=2.87" },
     { name = "docling-parse", specifier = ">=7.8" },
-    { name = "document2graph", extras = ["tokenizers", "surprisal", "embeddings", "linguistic", "neo4j"], marker = "extra == 'all'" },
-    { name = "matplotlib", specifier = ">=3.11.2" },
+    { name = "document2graph", extras = ["tokenizers", "surprisal", "embeddings", "linguistic", "neo4j", "plot"], marker = "extra == 'all'" },
+    { name = "matplotlib", marker = "extra == 'plot'", specifier = ">=3.11.2" },
     { name = "neo4j", marker = "extra == 'dev'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "networkx" },
@@ -871,7 +874,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'surprisal'", specifier = ">=4.40" },
     { name = "transformers", marker = "extra == 'tokenizers'", specifier = ">=4.40" },
 ]
-provides-extras = ["tokenizers", "surprisal", "embeddings", "linguistic", "neo4j", "dev", "all"]
+provides-extras = ["tokenizers", "surprisal", "embeddings", "linguistic", "neo4j", "plot", "dev", "all"]
 
 [[package]]
 name = "et-xmlfile"
