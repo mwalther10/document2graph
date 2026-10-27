@@ -33,6 +33,7 @@ or run the rule-based need and supply measures:
 | `embeddings` | semantic similarity backends |
 | `linguistic` | spaCy, an accuracy upgrade for the rule-based need estimators |
 | `neo4j` | writing graphs to a Neo4j instance |
+| `plot` | matplotlib, for the font-height histogram debug plot |
 | `all` | everything above |
 
 Requires Python 3.11+.

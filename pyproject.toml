@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "document2graph"
-version = "0.2.0"
+version = "0.2.1"
 description = "Extract hierarchical document graphs and baseline chunks from PDF"
 readme = "README.md"
 license = {text = "MIT"}
@@ -31,7 +31,6 @@ dependencies = [
     "networkx",
     "coloredlogs",
     "tqdm",
-    "matplotlib>=3.11.2",
     "certifi>=2026.10.19",
 ]
 
@@ -61,8 +60,10 @@ embeddings = ["sentence-transformers"]
 # fall back to regex lexicons, which are weaker on finite verbs and clause structure
 linguistic = ["spacy>=3.7"]
 neo4j = ["neo4j"]
+# only for the font-height histogram debug plot, get_height_hist(plot=True)
+plot = ["matplotlib>=3.11.2"]
 dev = ["pytest>=8", "python-dotenv", "neo4j"]
-all = ["document2graph[tokenizers,surprisal,embeddings,linguistic,neo4j]"]
+all = ["document2graph[tokenizers,surprisal,embeddings,linguistic,neo4j,plot]"]
 
 [tool.setuptools.packages.find]
 where = ["."]
