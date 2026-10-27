@@ -31,6 +31,8 @@ dependencies = [
     "networkx",
     "coloredlogs",
     "tqdm",
+    "matplotlib>=3.11.2",
+    "certifi>=2026.10.19",
 ]
 
 [project.urls]
